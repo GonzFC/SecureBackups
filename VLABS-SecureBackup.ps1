@@ -751,7 +751,8 @@ function Remove-BackupDestination {
 
     $confirm = Read-Host "`nAre you sure you want to delete '$($dest.ShortName)'? (yes/no)"
     if ($confirm -eq "yes") {
-        $destinations = $destinations | Where-Object { $_.ShortName -ne $dest.ShortName }
+        # Use @() to ensure we get an empty array, not null, if this is the last item
+        $destinations = @($destinations | Where-Object { $_.ShortName -ne $dest.ShortName })
         if (Save-Destinations -Destinations $destinations) {
             Write-Host "`nDestination deleted successfully!" -ForegroundColor Green
             Write-Log "Deleted destination: $($dest.ShortName)" -Level SUCCESS
@@ -1006,7 +1007,7 @@ function Show-AllBackupJobs {
     Write-Host "     ALL BACKUP JOBS" -ForegroundColor Cyan
     Write-Host "===============================================`n" -ForegroundColor Cyan
 
-    $jobs = Get-Jobs
+    $jobs = @(Get-Jobs)
 
     if ($jobs.Count -eq 0) {
         Write-Host "No backup jobs configured." -ForegroundColor Yellow
@@ -1055,7 +1056,7 @@ function Invoke-BackupJobNow {
     Write-Host "     RUN BACKUP JOB NOW" -ForegroundColor Cyan
     Write-Host "===============================================`n" -ForegroundColor Cyan
 
-    $jobs = Get-Jobs
+    $jobs = @(Get-Jobs)
 
     if ($jobs.Count -eq 0) {
         Write-Host "No backup jobs configured." -ForegroundColor Yellow
@@ -1115,7 +1116,7 @@ function Edit-BackupJob {
     Write-Host "     EDIT BACKUP JOB" -ForegroundColor Cyan
     Write-Host "===============================================`n" -ForegroundColor Cyan
 
-    $jobs = Get-Jobs
+    $jobs = @(Get-Jobs)
 
     if ($jobs.Count -eq 0) {
         Write-Host "No backup jobs configured." -ForegroundColor Yellow
@@ -1256,7 +1257,8 @@ function Remove-BackupJob {
         }
 
         # Remove from jobs list
-        $jobs = $jobs | Where-Object { $_.JobName -ne $job.JobName }
+        # Use @() to ensure we get an empty array, not null, if this is the last item
+        $jobs = @($jobs | Where-Object { $_.JobName -ne $job.JobName })
 
         if (Save-Jobs -Jobs $jobs) {
             Write-Host "`nJob deleted successfully!" -ForegroundColor Green
@@ -1273,7 +1275,7 @@ function Show-BackupStatus {
     Write-Host "     BACKUP STATUS & HISTORY" -ForegroundColor Cyan
     Write-Host "===============================================`n" -ForegroundColor Cyan
 
-    $jobs = Get-Jobs
+    $jobs = @(Get-Jobs)
 
     if ($jobs.Count -eq 0) {
         Write-Host "No backup jobs configured." -ForegroundColor Yellow
