@@ -290,6 +290,111 @@ function Disconnect-SmbShare {
 
 #endregion
 
+#region Tailscale Management Functions
+
+function Connect-Tailscale {
+    try {
+        Write-Log "Checking Tailscale status..." -Level INFO
+
+        # Check if Tailscale is installed
+        $tailscalePath = "tailscale"
+        $testCmd = Get-Command tailscale -ErrorAction SilentlyContinue
+        if (-not $testCmd) {
+            Write-Log "Tailscale CLI not found in PATH, checking common locations..." -Level WARNING
+
+            # Check common installation paths
+            $commonPaths = @(
+                "$env:ProgramFiles\Tailscale\tailscale.exe",
+                "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe",
+                "$env:LocalAppData\Tailscale\tailscale.exe"
+            )
+
+            foreach ($path in $commonPaths) {
+                if (Test-Path $path) {
+                    $tailscalePath = $path
+                    Write-Log "Found Tailscale at: $tailscalePath" -Level INFO
+                    break
+                }
+            }
+
+            if ($tailscalePath -eq "tailscale") {
+                Write-Log "Tailscale not found. Please ensure Tailscale is installed." -Level ERROR
+                return $false
+            }
+        }
+
+        # Check if already connected
+        $statusResult = & $tailscalePath status 2>&1
+        if ($LASTEXITCODE -eq 0 -and $statusResult -notmatch "Logged out") {
+            Write-Log "Tailscale is already connected" -Level INFO
+            return $true
+        }
+
+        # Bring up Tailscale connection
+        Write-Log "Bringing up Tailscale connection..." -Level INFO
+        $upResult = & $tailscalePath up 2>&1
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Tailscale connection established successfully" -Level SUCCESS
+
+            # Wait a moment for connection to stabilize
+            Start-Sleep -Seconds 2
+            return $true
+        }
+        else {
+            Write-Log "Failed to bring up Tailscale: $upResult" -Level ERROR
+            return $false
+        }
+    }
+    catch {
+        Write-Log "Error managing Tailscale connection: $_" -Level ERROR
+        return $false
+    }
+}
+
+function Disconnect-Tailscale {
+    try {
+        Write-Log "Bringing down Tailscale connection..." -Level INFO
+
+        # Find tailscale executable
+        $tailscalePath = "tailscale"
+        $testCmd = Get-Command tailscale -ErrorAction SilentlyContinue
+        if (-not $testCmd) {
+            $commonPaths = @(
+                "$env:ProgramFiles\Tailscale\tailscale.exe",
+                "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe",
+                "$env:LocalAppData\Tailscale\tailscale.exe"
+            )
+
+            foreach ($path in $commonPaths) {
+                if (Test-Path $path) {
+                    $tailscalePath = $path
+                    break
+                }
+            }
+        }
+
+        # Bring down Tailscale
+        $downResult = & $tailscalePath down 2>&1
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Tailscale connection brought down successfully" -Level SUCCESS
+            return $true
+        }
+        else {
+            # Don't treat this as a critical error - log warning and continue
+            Write-Log "Tailscale down command returned: $downResult" -Level WARNING
+            return $true
+        }
+    }
+    catch {
+        Write-Log "Error disconnecting Tailscale: $_" -Level WARNING
+        return $true  # Don't fail the backup if we can't disconnect
+    }
+}
+
+#endregion
+
 #region Backup Functions
 
 function Invoke-FileBackup {
@@ -312,9 +417,16 @@ function Invoke-FileBackup {
         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
         $fileName = $sourceFile.BaseName + "_" + $timestamp + $sourceFile.Extension
 
+        # Bring up Tailscale connection
+        if (-not (Connect-Tailscale)) {
+            Write-Log "Failed to establish Tailscale connection" -Level ERROR
+            return $false
+        }
+
         # Connect to SMB share
         if (-not (Connect-SmbShare -Job $Job)) {
             Write-Log "Failed to connect to destination share" -Level ERROR
+            Disconnect-Tailscale
             return $false
         }
 
@@ -322,6 +434,7 @@ function Invoke-FileBackup {
         if (-not (Test-Path $Job.DestinationPath)) {
             Write-Log "Destination path not accessible: $($Job.DestinationPath)" -Level ERROR
             Disconnect-SmbShare -Job $Job
+            Disconnect-Tailscale
             return $false
         }
 
@@ -369,17 +482,22 @@ function Invoke-FileBackup {
             # Disconnect from SMB share
             Disconnect-SmbShare -Job $Job
 
+            # Bring down Tailscale connection
+            Disconnect-Tailscale
+
             return $true
         }
         else {
             Write-Log "Robocopy failed with exit code: $LASTEXITCODE" -Level ERROR
             Disconnect-SmbShare -Job $Job
+            Disconnect-Tailscale
             return $false
         }
     }
     catch {
         Write-Log "Error during file backup: $_" -Level ERROR
         Disconnect-SmbShare -Job $Job
+        Disconnect-Tailscale
         return $false
     }
 }
@@ -399,9 +517,16 @@ function Invoke-DirectoryBackup {
             return $false
         }
 
+        # Bring up Tailscale connection
+        if (-not (Connect-Tailscale)) {
+            Write-Log "Failed to establish Tailscale connection" -Level ERROR
+            return $false
+        }
+
         # Connect to SMB share
         if (-not (Connect-SmbShare -Job $Job)) {
             Write-Log "Failed to connect to destination share" -Level ERROR
+            Disconnect-Tailscale
             return $false
         }
 
@@ -409,6 +534,7 @@ function Invoke-DirectoryBackup {
         if (-not (Test-Path $Job.DestinationPath)) {
             Write-Log "Destination path not accessible: $($Job.DestinationPath)" -Level ERROR
             Disconnect-SmbShare -Job $Job
+            Disconnect-Tailscale
             return $false
         }
 
@@ -457,17 +583,22 @@ function Invoke-DirectoryBackup {
             # Disconnect from SMB share
             Disconnect-SmbShare -Job $Job
 
+            # Bring down Tailscale connection
+            Disconnect-Tailscale
+
             return $true
         }
         else {
             Write-Log "Robocopy failed with exit code: $LASTEXITCODE" -Level ERROR
             Disconnect-SmbShare -Job $Job
+            Disconnect-Tailscale
             return $false
         }
     }
     catch {
         Write-Log "Error during directory backup: $_" -Level ERROR
         Disconnect-SmbShare -Job $Job
+        Disconnect-Tailscale
         return $false
     }
 }
@@ -487,9 +618,16 @@ function Invoke-SqlBackup {
             return $false
         }
 
+        # Bring up Tailscale connection
+        if (-not (Connect-Tailscale)) {
+            Write-Log "Failed to establish Tailscale connection" -Level ERROR
+            return $false
+        }
+
         # Connect to SMB share
         if (-not (Connect-SmbShare -Job $Job)) {
             Write-Log "Failed to connect to destination share" -Level ERROR
+            Disconnect-Tailscale
             return $false
         }
 
@@ -497,6 +635,7 @@ function Invoke-SqlBackup {
         if (-not (Test-Path $Job.DestinationPath)) {
             Write-Log "Destination path not accessible: $($Job.DestinationPath)" -Level ERROR
             Disconnect-SmbShare -Job $Job
+            Disconnect-Tailscale
             return $false
         }
 
@@ -515,6 +654,7 @@ function Invoke-SqlBackup {
         if ($recentFiles.Count -eq 0) {
             Write-Log "No SQL backup files found from the last 7 days" -Level WARNING
             Disconnect-SmbShare -Job $Job
+            Disconnect-Tailscale
             return $true  # Not a failure, just nothing to backup
         }
 
@@ -548,17 +688,20 @@ function Invoke-SqlBackup {
         if ($LASTEXITCODE -le 7) {
             Write-Log "SQL backup synchronization completed successfully" -Level SUCCESS
             Disconnect-SmbShare -Job $Job
+            Disconnect-Tailscale
             return $true
         }
         else {
             Write-Log "Robocopy failed with exit code: $LASTEXITCODE" -Level ERROR
             Disconnect-SmbShare -Job $Job
+            Disconnect-Tailscale
             return $false
         }
     }
     catch {
         Write-Log "Error during SQL backup synchronization: $_" -Level ERROR
         Disconnect-SmbShare -Job $Job
+        Disconnect-Tailscale
         return $false
     }
 }
