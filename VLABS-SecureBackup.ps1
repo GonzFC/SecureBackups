@@ -576,7 +576,7 @@ function New-BackupDestination {
 }
 
 function Show-Destinations {
-    $destinations = Get-Destinations
+    $destinations = @(Get-Destinations)
 
     if ($destinations.Count -eq 0) {
         Write-Host "`nNo destinations configured." -ForegroundColor Yellow
@@ -773,7 +773,7 @@ function New-BackupJob {
     Write-Host "===============================================`n" -ForegroundColor Cyan
 
     # Check if destinations exist
-    $destinations = Get-Destinations
+    $destinations = @(Get-Destinations)
     if ($destinations.Count -eq 0) {
         Write-Host "No destinations configured. Please create a destination first!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
