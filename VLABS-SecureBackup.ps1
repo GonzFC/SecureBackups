@@ -485,7 +485,7 @@ function New-BackupDestination {
     }
 
     # Check if name already exists
-    $destinations = Get-Destinations
+    $destinations = @(Get-Destinations)
     if ($destinations | Where-Object { $_.ShortName -eq $shortName }) {
         Write-Host "`nError: A destination with this name already exists!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
@@ -726,7 +726,7 @@ function Remove-BackupDestination {
     }
 
     # Check if any jobs use these destinations
-    $jobs = Get-Jobs
+    $jobs = @(Get-Jobs)
 
     $selection = Read-Host "`nSelect destination number to delete (or 0 to cancel)"
     $index = [int]$selection - 1
@@ -788,7 +788,7 @@ function New-BackupJob {
     }
 
     # Check if job name already exists
-    $jobs = Get-Jobs
+    $jobs = @(Get-Jobs)
     if ($jobs | Where-Object { $_.JobName -eq $jobName }) {
         Write-Host "`nError: A job with this name already exists!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
@@ -1212,7 +1212,7 @@ function Remove-BackupJob {
     Write-Host "     DELETE BACKUP JOB" -ForegroundColor Cyan
     Write-Host "===============================================`n" -ForegroundColor Cyan
 
-    $jobs = Get-Jobs
+    $jobs = @(Get-Jobs)
 
     if ($jobs.Count -eq 0) {
         Write-Host "No backup jobs configured." -ForegroundColor Yellow
