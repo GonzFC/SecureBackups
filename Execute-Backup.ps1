@@ -121,6 +121,175 @@ function Update-JobStatus {
 
 #endregion
 
+#region Credential Management Functions
+
+function ConvertFrom-EncryptedPassword {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$EncryptedPassword
+    )
+
+    try {
+        $securePassword = ConvertTo-SecureString -String $EncryptedPassword
+        return $securePassword
+    }
+    catch {
+        Write-Log "Error decrypting password: $_" -Level ERROR
+        return $null
+    }
+}
+
+function Get-PlainTextPassword {
+    param(
+        [Parameter(Mandatory=$true)]
+        [System.Security.SecureString]$SecurePassword
+    )
+
+    try {
+        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
+        $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+        return $plainPassword
+    }
+    catch {
+        Write-Log "Error converting secure password: $_" -Level ERROR
+        return $null
+    }
+}
+
+function Split-UncPath {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$UncPath
+    )
+
+    try {
+        if ($UncPath -notmatch '^\\\\([^\\]+)\\([^\\]+)(.*)$') {
+            Write-Log "Invalid UNC path format: $UncPath" -Level ERROR
+            return $null
+        }
+
+        $server = $matches[1]
+        $share = $matches[2]
+        $subPath = $matches[3].TrimStart('\')
+
+        return @{
+            Server = $server
+            Share = $share
+            SubPath = $subPath
+            SharePath = "\\$server\$share"
+            FullPath = $UncPath
+        }
+    }
+    catch {
+        Write-Log "Error parsing UNC path: $_" -Level ERROR
+        return $null
+    }
+}
+
+function Connect-SmbShare {
+    param(
+        [Parameter(Mandatory=$true)]
+        $Job
+    )
+
+    try {
+        $pathInfo = Split-UncPath -UncPath $Job.DestinationPath
+        if (-not $pathInfo) {
+            Write-Log "Failed to parse destination path" -Level ERROR
+            return $false
+        }
+
+        # Check if already connected
+        $existingConnection = net use | Select-String -Pattern "\\\\$($pathInfo.Server)\\$($pathInfo.Share)"
+        if ($existingConnection) {
+            Write-Log "Share already connected: $($pathInfo.SharePath)" -Level INFO
+            return $true
+        }
+
+        # Decrypt password
+        $securePassword = ConvertFrom-EncryptedPassword -EncryptedPassword $Job.DestinationEncryptedPassword
+        if (-not $securePassword) {
+            Write-Log "Failed to decrypt password" -Level ERROR
+            return $false
+        }
+
+        $plainPassword = Get-PlainTextPassword -SecurePassword $securePassword
+        if (-not $plainPassword) {
+            Write-Log "Failed to retrieve password" -Level ERROR
+            return $false
+        }
+
+        # Build credentials string
+        $userString = if ($Job.DestinationDomain) {
+            "$($Job.DestinationDomain)\$($Job.DestinationUsername)"
+        } else {
+            $Job.DestinationUsername
+        }
+
+        # Connect using net use
+        Write-Log "Connecting to $($pathInfo.SharePath) as $userString..." -Level INFO
+
+        $netUseCmd = "net use `"$($pathInfo.SharePath)`" /user:`"$userString`" `"$plainPassword`" 2>&1"
+        $result = cmd.exe /c $netUseCmd
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Successfully connected to share: $($pathInfo.SharePath)" -Level SUCCESS
+            return $true
+        }
+        else {
+            Write-Log "Failed to connect to share: $result" -Level ERROR
+            return $false
+        }
+    }
+    catch {
+        Write-Log "Error connecting to SMB share: $_" -Level ERROR
+        return $false
+    }
+}
+
+function Disconnect-SmbShare {
+    param(
+        [Parameter(Mandatory=$true)]
+        $Job
+    )
+
+    try {
+        $pathInfo = Split-UncPath -UncPath $Job.DestinationPath
+        if (-not $pathInfo) {
+            Write-Log "Failed to parse destination path for disconnect" -Level WARNING
+            return $false
+        }
+
+        # Check if connected
+        $existingConnection = net use | Select-String -Pattern "\\\\$($pathInfo.Server)\\$($pathInfo.Share)"
+        if (-not $existingConnection) {
+            Write-Log "Share not connected: $($pathInfo.SharePath)" -Level INFO
+            return $true
+        }
+
+        # Disconnect using net use
+        Write-Log "Disconnecting from $($pathInfo.SharePath)..." -Level INFO
+
+        $result = net use $pathInfo.SharePath /delete 2>&1
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Successfully disconnected from share: $($pathInfo.SharePath)" -Level SUCCESS
+            return $true
+        }
+        else {
+            Write-Log "Failed to disconnect from share: $result" -Level WARNING
+            return $false
+        }
+    }
+    catch {
+        Write-Log "Error disconnecting from SMB share: $_" -Level WARNING
+        return $false
+    }
+}
+
+#endregion
+
 #region Backup Functions
 
 function Invoke-FileBackup {
@@ -143,9 +312,16 @@ function Invoke-FileBackup {
         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
         $fileName = $sourceFile.BaseName + "_" + $timestamp + $sourceFile.Extension
 
+        # Connect to SMB share
+        if (-not (Connect-SmbShare -Job $Job)) {
+            Write-Log "Failed to connect to destination share" -Level ERROR
+            return $false
+        }
+
         # Verify destination is accessible
         if (-not (Test-Path $Job.DestinationPath)) {
             Write-Log "Destination path not accessible: $($Job.DestinationPath)" -Level ERROR
+            Disconnect-SmbShare -Job $Job
             return $false
         }
 
@@ -190,15 +366,20 @@ function Invoke-FileBackup {
             # Apply retention policy
             Invoke-RetentionPolicy -DestinationFolder $destinationFolder -Retention $Job.Retention
 
+            # Disconnect from SMB share
+            Disconnect-SmbShare -Job $Job
+
             return $true
         }
         else {
             Write-Log "Robocopy failed with exit code: $LASTEXITCODE" -Level ERROR
+            Disconnect-SmbShare -Job $Job
             return $false
         }
     }
     catch {
         Write-Log "Error during file backup: $_" -Level ERROR
+        Disconnect-SmbShare -Job $Job
         return $false
     }
 }
@@ -218,9 +399,16 @@ function Invoke-DirectoryBackup {
             return $false
         }
 
+        # Connect to SMB share
+        if (-not (Connect-SmbShare -Job $Job)) {
+            Write-Log "Failed to connect to destination share" -Level ERROR
+            return $false
+        }
+
         # Verify destination is accessible
         if (-not (Test-Path $Job.DestinationPath)) {
             Write-Log "Destination path not accessible: $($Job.DestinationPath)" -Level ERROR
+            Disconnect-SmbShare -Job $Job
             return $false
         }
 
@@ -266,15 +454,20 @@ function Invoke-DirectoryBackup {
             # Apply retention policy
             Invoke-RetentionPolicy -DestinationFolder $destinationBase -Retention $Job.Retention
 
+            # Disconnect from SMB share
+            Disconnect-SmbShare -Job $Job
+
             return $true
         }
         else {
             Write-Log "Robocopy failed with exit code: $LASTEXITCODE" -Level ERROR
+            Disconnect-SmbShare -Job $Job
             return $false
         }
     }
     catch {
         Write-Log "Error during directory backup: $_" -Level ERROR
+        Disconnect-SmbShare -Job $Job
         return $false
     }
 }
@@ -294,9 +487,16 @@ function Invoke-SqlBackup {
             return $false
         }
 
+        # Connect to SMB share
+        if (-not (Connect-SmbShare -Job $Job)) {
+            Write-Log "Failed to connect to destination share" -Level ERROR
+            return $false
+        }
+
         # Verify destination is accessible
         if (-not (Test-Path $Job.DestinationPath)) {
             Write-Log "Destination path not accessible: $($Job.DestinationPath)" -Level ERROR
+            Disconnect-SmbShare -Job $Job
             return $false
         }
 
@@ -314,6 +514,7 @@ function Invoke-SqlBackup {
 
         if ($recentFiles.Count -eq 0) {
             Write-Log "No SQL backup files found from the last 7 days" -Level WARNING
+            Disconnect-SmbShare -Job $Job
             return $true  # Not a failure, just nothing to backup
         }
 
@@ -346,15 +547,18 @@ function Invoke-SqlBackup {
         # Robocopy exit codes: 0-7 are success
         if ($LASTEXITCODE -le 7) {
             Write-Log "SQL backup synchronization completed successfully" -Level SUCCESS
+            Disconnect-SmbShare -Job $Job
             return $true
         }
         else {
             Write-Log "Robocopy failed with exit code: $LASTEXITCODE" -Level ERROR
+            Disconnect-SmbShare -Job $Job
             return $false
         }
     }
     catch {
         Write-Log "Error during SQL backup synchronization: $_" -Level ERROR
+        Disconnect-SmbShare -Job $Job
         return $false
     }
 }

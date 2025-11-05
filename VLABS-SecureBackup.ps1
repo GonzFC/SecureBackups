@@ -193,41 +193,263 @@ function Save-Jobs {
 
 #endregion
 
+#region Credential Management Functions
+
+function ConvertTo-EncryptedPassword {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$PlainTextPassword
+    )
+
+    try {
+        $securePassword = ConvertTo-SecureString -String $PlainTextPassword -AsPlainText -Force
+        $encryptedPassword = ConvertFrom-SecureString -SecureString $securePassword
+        return $encryptedPassword
+    }
+    catch {
+        Write-Log "Error encrypting password: $_" -Level ERROR
+        return $null
+    }
+}
+
+function ConvertFrom-EncryptedPassword {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$EncryptedPassword
+    )
+
+    try {
+        $securePassword = ConvertTo-SecureString -String $EncryptedPassword
+        return $securePassword
+    }
+    catch {
+        Write-Log "Error decrypting password: $_" -Level ERROR
+        return $null
+    }
+}
+
+function Get-PlainTextPassword {
+    param(
+        [Parameter(Mandatory=$true)]
+        [System.Security.SecureString]$SecurePassword
+    )
+
+    try {
+        $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePassword)
+        $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+        return $plainPassword
+    }
+    catch {
+        Write-Log "Error converting secure password: $_" -Level ERROR
+        return $null
+    }
+}
+
+function Split-UncPath {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$UncPath
+    )
+
+    try {
+        # Parse UNC path: \\server\share\subfolder1\subfolder2
+        # Return: @{ Server = "server"; Share = "share"; SubPath = "subfolder1\subfolder2"; SharePath = "\\server\share" }
+
+        if ($UncPath -notmatch '^\\\\([^\\]+)\\([^\\]+)(.*)$') {
+            Write-Host "Invalid UNC path format. Expected: \\server\share\subfolder" -ForegroundColor Red
+            return $null
+        }
+
+        $server = $matches[1]
+        $share = $matches[2]
+        $subPath = $matches[3].TrimStart('\')
+
+        return @{
+            Server = $server
+            Share = $share
+            SubPath = $subPath
+            SharePath = "\\$server\$share"
+            FullPath = $UncPath
+        }
+    }
+    catch {
+        Write-Log "Error parsing UNC path: $_" -Level ERROR
+        return $null
+    }
+}
+
+function Connect-SmbShare {
+    param(
+        [Parameter(Mandatory=$true)]
+        $Destination
+    )
+
+    try {
+        $pathInfo = Split-UncPath -UncPath $Destination.Path
+        if (-not $pathInfo) {
+            Write-Host "Failed to parse destination path" -ForegroundColor Red
+            return $false
+        }
+
+        # Check if already connected
+        $existingConnection = net use | Select-String -Pattern "\\\\$($pathInfo.Server)\\$($pathInfo.Share)"
+        if ($existingConnection) {
+            Write-Log "Share already connected: $($pathInfo.SharePath)" -Level INFO
+            return $true
+        }
+
+        # Decrypt password
+        $securePassword = ConvertFrom-EncryptedPassword -EncryptedPassword $Destination.EncryptedPassword
+        if (-not $securePassword) {
+            Write-Host "Failed to decrypt password" -ForegroundColor Red
+            return $false
+        }
+
+        $plainPassword = Get-PlainTextPassword -SecurePassword $securePassword
+        if (-not $plainPassword) {
+            Write-Host "Failed to retrieve password" -ForegroundColor Red
+            return $false
+        }
+
+        # Build credentials string
+        $userString = if ($Destination.Domain) {
+            "$($Destination.Domain)\$($Destination.Username)"
+        } else {
+            $Destination.Username
+        }
+
+        # Connect using net use
+        Write-Host "Connecting to $($pathInfo.SharePath)..." -ForegroundColor Yellow
+
+        # Use cmd.exe to properly handle the password with special characters
+        $netUseCmd = "net use `"$($pathInfo.SharePath)`" /user:`"$userString`" `"$plainPassword`" 2>&1"
+        $result = cmd.exe /c $netUseCmd
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Successfully connected to share" -ForegroundColor Green
+            Write-Log "Connected to SMB share: $($pathInfo.SharePath)" -Level SUCCESS
+            return $true
+        }
+        else {
+            Write-Host "Failed to connect to share: $result" -ForegroundColor Red
+            Write-Log "Failed to connect to SMB share $($pathInfo.SharePath): $result" -Level ERROR
+            return $false
+        }
+    }
+    catch {
+        Write-Host "Error connecting to SMB share: $_" -ForegroundColor Red
+        Write-Log "Error connecting to SMB share: $_" -Level ERROR
+        return $false
+    }
+}
+
+function Disconnect-SmbShare {
+    param(
+        [Parameter(Mandatory=$true)]
+        $Destination
+    )
+
+    try {
+        $pathInfo = Split-UncPath -UncPath $Destination.Path
+        if (-not $pathInfo) {
+            Write-Log "Failed to parse destination path for disconnect" -Level WARNING
+            return $false
+        }
+
+        # Check if connected
+        $existingConnection = net use | Select-String -Pattern "\\\\$($pathInfo.Server)\\$($pathInfo.Share)"
+        if (-not $existingConnection) {
+            Write-Log "Share not connected: $($pathInfo.SharePath)" -Level INFO
+            return $true
+        }
+
+        # Disconnect using net use
+        Write-Host "Disconnecting from $($pathInfo.SharePath)..." -ForegroundColor Yellow
+
+        $result = net use $pathInfo.SharePath /delete 2>&1
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Successfully disconnected from share" -ForegroundColor Green
+            Write-Log "Disconnected from SMB share: $($pathInfo.SharePath)" -Level SUCCESS
+            return $true
+        }
+        else {
+            Write-Host "Failed to disconnect from share: $result" -ForegroundColor Yellow
+            Write-Log "Failed to disconnect from SMB share $($pathInfo.SharePath): $result" -Level WARNING
+            return $false
+        }
+    }
+    catch {
+        Write-Host "Error disconnecting from SMB share: $_" -ForegroundColor Yellow
+        Write-Log "Error disconnecting from SMB share: $_" -Level WARNING
+        return $false
+    }
+}
+
+#endregion
+
 #region Destination Management
 
 function Test-SmbDestination {
     param(
         [Parameter(Mandatory=$true)]
-        [string]$Path
+        $Destination
     )
 
     try {
         # Validate UNC path format
-        if ($Path -notmatch '^\\\\[^\\]+\\[^\\]+') {
-            Write-Host "Invalid UNC path format. Expected: \\server\folder" -ForegroundColor Red
+        $pathInfo = Split-UncPath -UncPath $Destination.Path
+        if (-not $pathInfo) {
             return $false
         }
 
-        # Test if path is reachable
-        if (-not (Test-Path $Path)) {
-            Write-Host "Path is not reachable or does not exist." -ForegroundColor Red
+        # Connect to the share
+        Write-Host "Step 1: Connecting to share..." -ForegroundColor Cyan
+        if (-not (Connect-SmbShare -Destination $Destination)) {
             return $false
+        }
+
+        # Navigate to and test the full path including subfolders
+        Write-Host "Step 2: Verifying path and subfolders..." -ForegroundColor Cyan
+        if (-not (Test-Path $Destination.Path)) {
+            Write-Host "Path does not exist: $($Destination.Path)" -ForegroundColor Red
+            Write-Host "Creating directory structure..." -ForegroundColor Yellow
+            try {
+                New-Item -Path $Destination.Path -ItemType Directory -Force -ErrorAction Stop | Out-Null
+                Write-Host "Directory created successfully" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "Failed to create directory: $_" -ForegroundColor Red
+                Disconnect-SmbShare -Destination $Destination
+                return $false
+            }
         }
 
         # Test write permissions
-        $testFile = Join-Path $Path "vlabs_test_$(Get-Date -Format 'yyyyMMddHHmmss').tmp"
+        Write-Host "Step 3: Testing write permissions..." -ForegroundColor Cyan
+        $testFile = Join-Path $Destination.Path "vlabs_test_$(Get-Date -Format 'yyyyMMddHHmmss').tmp"
         try {
             "test" | Out-File -FilePath $testFile -ErrorAction Stop
             Remove-Item $testFile -Force -ErrorAction Stop
-            return $true
+            Write-Host "Write test successful!" -ForegroundColor Green
         }
         catch {
             Write-Host "Path is not writable: $_" -ForegroundColor Red
+            Disconnect-SmbShare -Destination $Destination
             return $false
         }
+
+        # Disconnect from the share
+        Write-Host "Step 4: Disconnecting from share..." -ForegroundColor Cyan
+        Disconnect-SmbShare -Destination $Destination | Out-Null
+
+        Write-Host "`nDestination verification completed successfully!" -ForegroundColor Green
+        return $true
     }
     catch {
         Write-Host "Error testing destination: $_" -ForegroundColor Red
+        Disconnect-SmbShare -Destination $Destination | Out-Null
         return $false
     }
 }
@@ -255,25 +477,72 @@ function New-BackupDestination {
     }
 
     # Get SMB path
-    $smbPath = Read-Host "Enter SMB path (e.g., \\server\folder)"
+    Write-Host "`nEnter the full SMB path including all subfolders"
+    $smbPath = Read-Host "Path (e.g., \\server\share\subfolder1\subfolder2)"
     if ([string]::IsNullOrWhiteSpace($smbPath)) {
         Write-Host "`nError: SMB path cannot be empty!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
 
+    # Validate path format
+    $pathInfo = Split-UncPath -UncPath $smbPath
+    if (-not $pathInfo) {
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    # Get credentials
+    Write-Host "`n--- Authentication Credentials ---" -ForegroundColor Yellow
+    $domain = Read-Host "Enter domain (leave empty if not using domain)"
+
+    $username = Read-Host "Enter username"
+    if ([string]::IsNullOrWhiteSpace($username)) {
+        Write-Host "`nError: Username cannot be empty!" -ForegroundColor Red
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    $password = Read-Host "Enter password" -AsSecureString
+    $plainPassword = Get-PlainTextPassword -SecurePassword $password
+    if ([string]::IsNullOrWhiteSpace($plainPassword)) {
+        Write-Host "`nError: Password cannot be empty!" -ForegroundColor Red
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    # Encrypt password
+    $encryptedPassword = ConvertTo-EncryptedPassword -PlainTextPassword $plainPassword
+    if (-not $encryptedPassword) {
+        Write-Host "`nError: Failed to encrypt password!" -ForegroundColor Red
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    # Create temporary destination object for testing
+    $testDestination = @{
+        ShortName = $shortName
+        Path = $smbPath
+        Domain = $domain
+        Username = $username
+        EncryptedPassword = $encryptedPassword
+    }
+
     # Verify destination
-    Write-Host "`nVerifying destination..." -ForegroundColor Yellow
-    if (-not (Test-SmbDestination -Path $smbPath)) {
+    Write-Host "`n--- Verifying Destination ---" -ForegroundColor Yellow
+    if (-not (Test-SmbDestination -Destination $testDestination)) {
         Write-Host "`nDestination verification failed!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
 
-    # Add destination
+    # Add destination with all information
     $newDestination = @{
         ShortName = $shortName
         Path = $smbPath
+        Domain = $domain
+        Username = $username
+        EncryptedPassword = $encryptedPassword
         CreatedDate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     }
 
@@ -281,7 +550,7 @@ function New-BackupDestination {
 
     if (Save-Destinations -Destinations $destinations) {
         Write-Host "`nDestination '$shortName' created successfully!" -ForegroundColor Green
-        Write-Log "Created destination: $shortName -> $smbPath" -Level SUCCESS
+        Write-Log "Created destination: $shortName -> $smbPath (User: $($domain)\$username)" -Level SUCCESS
     }
     else {
         Write-Host "`nFailed to save destination!" -ForegroundColor Red
@@ -335,19 +604,93 @@ function Edit-BackupDestination {
     $dest = $destinations[$index]
     Write-Host "`nEditing: $($dest.ShortName)" -ForegroundColor Yellow
     Write-Host "Current path: $($dest.Path)" -ForegroundColor Gray
+    Write-Host "Current user: $($dest.Domain)\$($dest.Username)" -ForegroundColor Gray
 
-    $newPath = Read-Host "`nEnter new SMB path (or press Enter to keep current)"
-    if (-not [string]::IsNullOrWhiteSpace($newPath)) {
-        Write-Host "`nVerifying new destination..." -ForegroundColor Yellow
-        if (Test-SmbDestination -Path $newPath) {
-            $destinations[$index].Path = $newPath
-            if (Save-Destinations -Destinations $destinations) {
-                Write-Host "`nDestination updated successfully!" -ForegroundColor Green
-                Write-Log "Updated destination: $($dest.ShortName) -> $newPath" -Level SUCCESS
+    Write-Host "`nWhat would you like to edit?" -ForegroundColor Cyan
+    Write-Host "1. Path"
+    Write-Host "2. Credentials (domain, username, password)"
+    Write-Host "3. Cancel"
+
+    $choice = Read-Host "`nEnter choice"
+
+    $updated = $false
+
+    switch ($choice) {
+        "1" {
+            $newPath = Read-Host "`nEnter new SMB path (e.g., \\server\share\subfolder1\subfolder2)"
+            if (-not [string]::IsNullOrWhiteSpace($newPath)) {
+                # Validate path format
+                $pathInfo = Split-UncPath -UncPath $newPath
+                if ($pathInfo) {
+                    # Create test destination with new path
+                    $testDest = @{
+                        Path = $newPath
+                        Domain = $dest.Domain
+                        Username = $dest.Username
+                        EncryptedPassword = $dest.EncryptedPassword
+                    }
+
+                    Write-Host "`nVerifying new destination..." -ForegroundColor Yellow
+                    if (Test-SmbDestination -Destination $testDest) {
+                        $destinations[$index].Path = $newPath
+                        $updated = $true
+                    }
+                    else {
+                        Write-Host "`nDestination verification failed! Changes not saved." -ForegroundColor Red
+                    }
+                }
             }
         }
-        else {
-            Write-Host "`nDestination verification failed! Changes not saved." -ForegroundColor Red
+        "2" {
+            Write-Host "`n--- Update Credentials ---" -ForegroundColor Yellow
+            $newDomain = Read-Host "Enter domain (current: $($dest.Domain), press Enter to keep)"
+            $newUsername = Read-Host "Enter username (current: $($dest.Username), press Enter to keep)"
+            $newPassword = Read-Host "Enter new password (press Enter to keep current)" -AsSecureString
+
+            $passwordChanged = $false
+            $plainNewPassword = Get-PlainTextPassword -SecurePassword $newPassword
+            if (-not [string]::IsNullOrWhiteSpace($plainNewPassword)) {
+                $passwordChanged = $true
+            }
+
+            # Update fields
+            if (-not [string]::IsNullOrWhiteSpace($newDomain)) {
+                $destinations[$index].Domain = $newDomain
+            }
+            if (-not [string]::IsNullOrWhiteSpace($newUsername)) {
+                $destinations[$index].Username = $newUsername
+            }
+            if ($passwordChanged) {
+                $encryptedPassword = ConvertTo-EncryptedPassword -PlainTextPassword $plainNewPassword
+                if ($encryptedPassword) {
+                    $destinations[$index].EncryptedPassword = $encryptedPassword
+                }
+            }
+
+            # Test the updated credentials
+            Write-Host "`nVerifying updated credentials..." -ForegroundColor Yellow
+            if (Test-SmbDestination -Destination $destinations[$index]) {
+                $updated = $true
+            }
+            else {
+                Write-Host "`nCredential verification failed! Reverting changes." -ForegroundColor Red
+                # Revert changes
+                $destinations[$index] = $dest
+            }
+        }
+        "3" {
+            Read-Host "`nPress Enter to continue"
+            return
+        }
+        default {
+            Write-Host "`nInvalid choice!" -ForegroundColor Red
+        }
+    }
+
+    if ($updated) {
+        if (Save-Destinations -Destinations $destinations) {
+            Write-Host "`nDestination updated successfully!" -ForegroundColor Green
+            Write-Log "Updated destination: $($dest.ShortName)" -Level SUCCESS
         }
     }
 
@@ -530,13 +873,16 @@ function New-BackupJob {
         return
     }
 
-    # Create job object
+    # Create job object (including credentials from destination)
     $newJob = @{
         JobName = $jobName
         BackupType = $backupType
         BackupObject = $backupObject
         Destination = $selectedDestination.ShortName
         DestinationPath = $selectedDestination.Path
+        DestinationDomain = $selectedDestination.Domain
+        DestinationUsername = $selectedDestination.Username
+        DestinationEncryptedPassword = $selectedDestination.EncryptedPassword
         Retention = [int]$retention
         Frequency = [int]$frequency
         StartHour = [int]$startHour
