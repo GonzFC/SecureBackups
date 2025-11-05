@@ -959,19 +959,20 @@ function New-ScheduledBackupTask {
         $triggers = @()
         $startTime = Get-Date -Hour $Job.StartHour -Minute 0 -Second 0
 
-        # Create daily trigger
-        $trigger = New-ScheduledTaskTrigger -Daily -At $startTime
-
-        # If frequency is less than 24 hours, add repetition
+        # If frequency is less than 24 hours, use a Once trigger with repetition
         if ($Job.Frequency -lt 24) {
-            # Create repetition pattern manually to avoid TimeSpan::MaxValue issues
-            # Use 9999 days (about 27 years) as a practical "indefinite" duration
+            # Use -Once trigger with repetition interval and duration
+            # Use 9999 days as practical "indefinite" duration (about 27 years)
             $repetitionDuration = New-TimeSpan -Days 9999
             $repetitionInterval = New-TimeSpan -Hours $Job.Frequency
 
-            # Set repetition using the Repetition property
-            $trigger.Repetition.Duration = "P9999D"  # ISO 8601 duration format for 9999 days
-            $trigger.Repetition.Interval = "PT$($Job.Frequency)H"  # ISO 8601 interval format
+            $trigger = New-ScheduledTaskTrigger -Once -At $startTime `
+                -RepetitionInterval $repetitionInterval `
+                -RepetitionDuration $repetitionDuration
+        }
+        else {
+            # For 24-hour frequency, just use a daily trigger
+            $trigger = New-ScheduledTaskTrigger -Daily -At $startTime
         }
 
         $triggers += $trigger
