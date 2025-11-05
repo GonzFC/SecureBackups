@@ -61,7 +61,15 @@ function Get-Jobs {
         }
 
         $content = Get-Content $JobsFile -Raw -ErrorAction Stop
-        return ($content | ConvertFrom-Json)
+        $result = $content | ConvertFrom-Json
+
+        # Force result to be an array (PowerShell returns single objects as non-arrays)
+        if ($result -eq $null) {
+            return @()
+        }
+
+        # Use @() to ensure we always have an array, even with one item
+        return @($result)
     }
     catch {
         Write-Log "Error reading jobs: $_" -Level ERROR
