@@ -166,7 +166,17 @@ function Save-Destinations {
     param([Parameter(Mandatory=$true)] $Destinations)
 
     try {
-        $Destinations | ConvertTo-Json -Depth 10 | Set-Content $DestinationsFile -ErrorAction Stop
+        # Ensure we always have an array, even if empty
+        $destinationsArray = @($Destinations)
+
+        # ConvertTo-Json with explicit array handling
+        if ($destinationsArray.Count -eq 0) {
+            # Explicitly save empty array as "[]"
+            "[]" | Set-Content $DestinationsFile -ErrorAction Stop
+        }
+        else {
+            $destinationsArray | ConvertTo-Json -Depth 10 | Set-Content $DestinationsFile -ErrorAction Stop
+        }
         return $true
     }
     catch {
@@ -198,7 +208,17 @@ function Save-Jobs {
     param([Parameter(Mandatory=$true)] $Jobs)
 
     try {
-        $Jobs | ConvertTo-Json -Depth 10 | Set-Content $JobsFile -ErrorAction Stop
+        # Ensure we always have an array, even if empty
+        $jobsArray = @($Jobs)
+
+        # ConvertTo-Json with explicit array handling
+        if ($jobsArray.Count -eq 0) {
+            # Explicitly save empty array as "[]"
+            "[]" | Set-Content $JobsFile -ErrorAction Stop
+        }
+        else {
+            $jobsArray | ConvertTo-Json -Depth 10 | Set-Content $JobsFile -ErrorAction Stop
+        }
         return $true
     }
     catch {

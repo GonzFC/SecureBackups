@@ -81,7 +81,17 @@ function Save-Jobs {
     param([Parameter(Mandatory=$true)] $Jobs)
 
     try {
-        $Jobs | ConvertTo-Json -Depth 10 | Set-Content $JobsFile -ErrorAction Stop
+        # Ensure we always have an array, even if empty
+        $jobsArray = @($Jobs)
+
+        # ConvertTo-Json with explicit array handling
+        if ($jobsArray.Count -eq 0) {
+            # Explicitly save empty array as "[]"
+            "[]" | Set-Content $JobsFile -ErrorAction Stop
+        }
+        else {
+            $jobsArray | ConvertTo-Json -Depth 10 | Set-Content $JobsFile -ErrorAction Stop
+        }
         return $true
     }
     catch {
@@ -546,32 +556,31 @@ function Invoke-DirectoryBackup {
             return $false
         }
 
-        # Create job-specific subfolder in destination
-        $destinationBase = Join-Path $Job.DestinationPath $Job.JobName
-        if (-not (Test-Path $destinationBase)) {
-            New-Item -Path $destinationBase -ItemType Directory -Force | Out-Null
-            Write-Log "Created destination base folder: $destinationBase" -Level INFO
+        # Create job-specific subfolder in destination (sync target)
+        $destinationFolder = Join-Path $Job.DestinationPath $Job.JobName
+        if (-not (Test-Path $destinationFolder)) {
+            New-Item -Path $destinationFolder -ItemType Directory -Force | Out-Null
+            Write-Log "Created destination folder: $destinationFolder" -Level INFO
         }
-
-        # Create timestamped backup folder
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $destinationFolder = Join-Path $destinationBase "Backup_$timestamp"
-        New-Item -Path $destinationFolder -ItemType Directory -Force | Out-Null
 
         $robocopyLog = Join-Path $LogPath "robocopy_$($Job.JobName)_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
-        Write-Log "Copying directory: $($Job.BackupObject) -> $destinationFolder" -Level INFO
+        Write-Log "Synchronizing directory: $($Job.BackupObject) -> $destinationFolder" -Level INFO
 
-        # Robocopy parameters:
-        # /E = Copy subdirectories, including empty ones
+        # Robocopy parameters for sync with change detection:
+        # /MIR = Mirror (sync all, delete extras at destination)
         # /R:3 = 3 retries on failed copies
         # /W:5 = Wait 5 seconds between retries
         # /MT:8 = Multi-threaded (8 threads)
+        # /DCOPY:DAT = Copy directory timestamps, attributes, data
+        # /COPY:DAT = Copy file data, attributes, timestamps
         # /LOG = Log file
         $robocopyArgs = @(
             "`"$($Job.BackupObject)`"",
             "`"$destinationFolder`"",
-            "/E",
+            "/MIR",
+            "/DCOPY:DAT",
+            "/COPY:DAT",
             "/R:3",
             "/W:5",
             "/MT:8",
@@ -583,10 +592,7 @@ function Invoke-DirectoryBackup {
 
         # Robocopy exit codes: 0-7 are success
         if ($LASTEXITCODE -le 7) {
-            Write-Log "Directory backup completed successfully" -Level SUCCESS
-
-            # Apply retention policy
-            Invoke-RetentionPolicy -DestinationFolder $destinationBase -Retention $Job.Retention
+            Write-Log "Directory synchronization completed successfully" -Level SUCCESS
 
             # Disconnect from SMB share
             Disconnect-SmbShare -Job $Job
@@ -647,42 +653,31 @@ function Invoke-SqlBackup {
             return $false
         }
 
-        # Create job-specific subfolder in destination
+        # Create job-specific subfolder in destination (sync target)
         $destinationFolder = Join-Path $Job.DestinationPath $Job.JobName
         if (-not (Test-Path $destinationFolder)) {
             New-Item -Path $destinationFolder -ItemType Directory -Force | Out-Null
             Write-Log "Created destination folder: $destinationFolder" -Level INFO
         }
 
-        # Get files from last 7 days
-        $sevenDaysAgo = (Get-Date).AddDays(-7)
-        $recentFiles = Get-ChildItem -Path $Job.BackupObject -File |
-                       Where-Object { $_.LastWriteTime -ge $sevenDaysAgo }
-
-        if ($recentFiles.Count -eq 0) {
-            Write-Log "No SQL backup files found from the last 7 days" -Level WARNING
-            Disconnect-SmbShare -Job $Job
-            Disconnect-Tailscale
-            return $true  # Not a failure, just nothing to backup
-        }
-
-        Write-Log "Found $($recentFiles.Count) SQL backup file(s) from the last 7 days" -Level INFO
-
         $robocopyLog = Join-Path $LogPath "robocopy_$($Job.JobName)_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
-        # Use robocopy to sync only changed files
-        # /MAXAGE:7 = Only files modified in last 7 days
-        # /XO = Exclude older (don't overwrite newer files at destination)
-        # /E = Copy subdirectories, including empty ones
+        Write-Log "Synchronizing SQL backup directory: $($Job.BackupObject) -> $destinationFolder" -Level INFO
+
+        # Use robocopy to sync all files with change detection:
+        # /MIR = Mirror (sync all, delete extras at destination)
         # /R:3 = 3 retries on failed copies
         # /W:5 = Wait 5 seconds between retries
         # /MT:8 = Multi-threaded (8 threads)
+        # /DCOPY:DAT = Copy directory timestamps, attributes, data
+        # /COPY:DAT = Copy file data, attributes, timestamps
+        # /LOG = Log file
         $robocopyArgs = @(
             "`"$($Job.BackupObject)`"",
             "`"$destinationFolder`"",
-            "/MAXAGE:7",
-            "/XO",
-            "/E",
+            "/MIR",
+            "/DCOPY:DAT",
+            "/COPY:DAT",
             "/R:3",
             "/W:5",
             "/MT:8",
