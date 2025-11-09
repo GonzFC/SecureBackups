@@ -997,8 +997,10 @@ function New-ScheduledBackupTask {
 
         $triggers += $trigger
 
-        # Create task principal (run with highest privileges)
-        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+        # Create task principal (run as current user with highest privileges)
+        # This ensures DPAPI encryption/decryption works correctly for stored credentials
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $principal = New-ScheduledTaskPrincipal -UserId $currentUser -RunLevel Highest
 
         # Create task settings
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
