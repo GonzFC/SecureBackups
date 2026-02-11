@@ -18,6 +18,12 @@ $script:ConfigPath = "C:\VLABS_SecureBackups"
 $script:JobsFile = Join-Path $ConfigPath "jobs.json"
 $script:LogPath = Join-Path $ConfigPath "Logs"
 
+# Load crypto utilities for machine-independent password decryption
+$cryptoUtilsPath = Join-Path $PSScriptRoot "CryptoUtils.ps1"
+if (Test-Path $cryptoUtilsPath) {
+    . $cryptoUtilsPath
+}
+
 # VLABS Monitor Configuration (for future integration)
 $script:VlabsMonitorUrl = $env:VLABS_MONITOR_URL  # e.g., "http://100.x.x.x:8080/api"
 $script:VlabsMonitorEnabled = $false  # Will be enabled when VLABS Monitor is deployed
@@ -444,16 +450,30 @@ function Connect-SmbShare {
             return $true
         }
 
-        # Decrypt password
-        $securePassword = ConvertFrom-EncryptedPassword -EncryptedPassword $Job.DestinationEncryptedPassword
-        if (-not $securePassword) {
-            Write-Log "Failed to decrypt password" -Level ERROR
-            return $false
+        # Decrypt password using hybrid method (AES first, then DPAPI fallback)
+        $plainPassword = $null
+        
+        # Try new AES method first (if CryptoUtils is loaded)
+        if (Get-Command 'Unprotect-Password' -ErrorAction SilentlyContinue) {
+            $plainPassword = Unprotect-Password -EncryptedPassword $Job.DestinationEncryptedPassword
         }
-
-        $plainPassword = Get-PlainTextPassword -SecurePassword $securePassword
+        
+        # Fallback to legacy DPAPI if AES failed or CryptoUtils not available
         if (-not $plainPassword) {
-            Write-Log "Failed to retrieve password" -Level ERROR
+            try {
+                $securePassword = ConvertTo-SecureString -String $Job.DestinationEncryptedPassword -ErrorAction Stop
+                $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+                $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+            }
+            catch {
+                Write-Log "Failed to decrypt password (neither AES nor DPAPI worked)" -Level ERROR
+                return $false
+            }
+        }
+        
+        if (-not $plainPassword) {
+            Write-Log "Failed to decrypt password" -Level ERROR
             return $false
         }
 

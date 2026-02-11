@@ -18,6 +18,12 @@ $script:JobsFile = Join-Path $ConfigPath "jobs.json"
 $script:LogPath = Join-Path $ConfigPath "Logs"
 $script:ExecutionScript = Join-Path $PSScriptRoot "Execute-Backup.ps1"
 
+# Load crypto utilities for machine-independent password encryption
+$cryptoUtilsPath = Join-Path $PSScriptRoot "CryptoUtils.ps1"
+if (Test-Path $cryptoUtilsPath) {
+    . $cryptoUtilsPath
+}
+
 #region Initialization
 
 function Initialize-Environment {
@@ -238,6 +244,15 @@ function ConvertTo-EncryptedPassword {
     )
 
     try {
+        # Use AES encryption if CryptoUtils is available (machine-independent)
+        if (Get-Command 'Protect-Password' -ErrorAction SilentlyContinue) {
+            $encrypted = Protect-Password -PlainTextPassword $PlainTextPassword
+            if ($encrypted) {
+                return $encrypted
+            }
+        }
+        
+        # Fallback to DPAPI (legacy, user-specific)
         $securePassword = ConvertTo-SecureString -String $PlainTextPassword -AsPlainText -Force
         $encryptedPassword = ConvertFrom-SecureString -SecureString $securePassword
         return $encryptedPassword
@@ -1373,6 +1388,184 @@ function Show-BackupStatus {
     }
 
     Read-Host "`n`nPress Enter to continue"
+}
+
+#endregion
+
+#region Re-authentication Functions
+
+function Invoke-ReauthenticateAllDestinations {
+    <#
+    .SYNOPSIS
+        Re-authenticates all destinations, migrating credentials to AES format
+    #>
+    Clear-Host
+    Write-Host "`n===============================================" -ForegroundColor Cyan
+    Write-Host "     RE-AUTHENTICATE ALL DESTINATIONS" -ForegroundColor Cyan
+    Write-Host "===============================================`n" -ForegroundColor Cyan
+    
+    $destinations = @(Get-Destinations)
+    
+    if ($destinations.Count -eq 0) {
+        Write-Host "No destinations configured." -ForegroundColor Yellow
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+    
+    Write-Host "This will re-encrypt all destination passwords using machine-independent" -ForegroundColor Yellow
+    Write-Host "encryption, ensuring scheduled tasks work regardless of which user runs them." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "You will need to enter the password for each destination." -ForegroundColor White
+    Write-Host ""
+    
+    $confirm = Read-Host "Continue? (yes/no)"
+    if ($confirm -ne "yes") {
+        return
+    }
+    
+    Write-Host ""
+    
+    foreach ($dest in $destinations) {
+        Write-Host "----------------------------------------" -ForegroundColor Gray
+        Write-Host "Destination: $($dest.ShortName)" -ForegroundColor Cyan
+        Write-Host "Path: $($dest.Path)" -ForegroundColor Gray
+        Write-Host "User: $($dest.Domain)\$($dest.Username)" -ForegroundColor Gray
+        Write-Host ""
+        
+        # Check if already using AES
+        if ($dest.EncryptedPassword -and $dest.EncryptedPassword.StartsWith("AES:")) {
+            Write-Host "Already using machine-independent encryption." -ForegroundColor Green
+            $reenter = Read-Host "Re-enter password anyway? (yes/no)"
+            if ($reenter -ne "yes") {
+                continue
+            }
+        }
+        
+        $password = Read-Host "Enter password for $($dest.ShortName)" -AsSecureString
+        $plainPassword = Get-PlainTextPassword -SecurePassword $password
+        
+        if ([string]::IsNullOrWhiteSpace($plainPassword)) {
+            Write-Host "Skipped (empty password)" -ForegroundColor Yellow
+            continue
+        }
+        
+        # Encrypt with AES
+        $encrypted = ConvertTo-EncryptedPassword -PlainTextPassword $plainPassword
+        if ($encrypted) {
+            # Update destination
+            $dest.EncryptedPassword = $encrypted
+            Write-Host "Password re-encrypted successfully!" -ForegroundColor Green
+        }
+        else {
+            Write-Host "Failed to encrypt password!" -ForegroundColor Red
+        }
+        
+        Write-Host ""
+    }
+    
+    # Save destinations
+    if (Save-Destinations -Destinations $destinations) {
+        Write-Host "========================================" -ForegroundColor Green
+        Write-Host "All destinations updated successfully!" -ForegroundColor Green
+        Write-Host "========================================" -ForegroundColor Green
+        Write-Log "Re-authenticated all destinations with machine-independent encryption" -Level SUCCESS
+        
+        # Also update jobs with new credentials
+        Write-Host ""
+        Write-Host "Updating backup jobs with new credentials..." -ForegroundColor Cyan
+        
+        $jobs = @(Get-Jobs)
+        $updatedCount = 0
+        
+        foreach ($job in $jobs) {
+            $dest = $destinations | Where-Object { $_.ShortName -eq $job.Destination }
+            if ($dest) {
+                $job.DestinationEncryptedPassword = $dest.EncryptedPassword
+                $updatedCount++
+            }
+        }
+        
+        if (Save-Jobs -Jobs $jobs) {
+            Write-Host "$updatedCount job(s) updated with new credentials." -ForegroundColor Green
+        }
+    }
+    else {
+        Write-Host "Failed to save destinations!" -ForegroundColor Red
+    }
+    
+    Read-Host "`nPress Enter to continue"
+}
+
+function Test-DestinationCredentials {
+    <#
+    .SYNOPSIS
+        Tests if destination credentials can be decrypted
+    #>
+    Clear-Host
+    Write-Host "`n===============================================" -ForegroundColor Cyan
+    Write-Host "     TEST CREDENTIAL DECRYPTION" -ForegroundColor Cyan
+    Write-Host "===============================================`n" -ForegroundColor Cyan
+    
+    $destinations = @(Get-Destinations)
+    
+    if ($destinations.Count -eq 0) {
+        Write-Host "No destinations configured." -ForegroundColor Yellow
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+    
+    $needsReauth = $false
+    
+    foreach ($dest in $destinations) {
+        Write-Host "$($dest.ShortName): " -NoNewline -ForegroundColor White
+        
+        if (-not $dest.EncryptedPassword) {
+            Write-Host "NO PASSWORD STORED" -ForegroundColor Red
+            $needsReauth = $true
+            continue
+        }
+        
+        # Check encryption type
+        if ($dest.EncryptedPassword.StartsWith("AES:")) {
+            # AES encrypted
+            if (Get-Command 'Unprotect-Password' -ErrorAction SilentlyContinue) {
+                $result = Unprotect-Password -EncryptedPassword $dest.EncryptedPassword
+                if ($result) {
+                    Write-Host "OK (AES - Machine Independent)" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "FAILED (AES decryption error)" -ForegroundColor Red
+                    $needsReauth = $true
+                }
+            }
+            else {
+                Write-Host "UNKNOWN (CryptoUtils not loaded)" -ForegroundColor Yellow
+            }
+        }
+        else {
+            # DPAPI encrypted (legacy)
+            try {
+                $securePassword = ConvertTo-SecureString -String $dest.EncryptedPassword -ErrorAction Stop
+                Write-Host "OK (DPAPI - User Specific) - Consider re-auth for portability" -ForegroundColor Yellow
+            }
+            catch {
+                Write-Host "FAILED (DPAPI - Wrong user context)" -ForegroundColor Red
+                $needsReauth = $true
+            }
+        }
+    }
+    
+    Write-Host ""
+    
+    if ($needsReauth) {
+        Write-Host "Some credentials need re-authentication!" -ForegroundColor Red
+        Write-Host "Use the 'Re-authenticate All Destinations' option from the menu." -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "All credentials are accessible." -ForegroundColor Green
+    }
+    
+    Read-Host "`nPress Enter to continue"
 }
 
 #endregion

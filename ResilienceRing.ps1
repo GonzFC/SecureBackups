@@ -27,7 +27,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.1.4'
+$script:AppVersion = '1.2.0'
 $script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -479,6 +479,11 @@ function Show-MainMenu {
     Write-Host "   9. View Status & History" -ForegroundColor White
 
     Write-Host ""
+    Write-Host " MAINTENANCE" -ForegroundColor Yellow
+    Write-Host "   R. Re-authenticate All Destinations" -ForegroundColor White
+    Write-Host "   T. Test Credential Decryption" -ForegroundColor White
+
+    Write-Host ""
     Write-Host " SYSTEM" -ForegroundColor Yellow
     Write-Host "   U. Check for Updates" -ForegroundColor White
     Write-Host "   0. Exit" -ForegroundColor White
@@ -501,6 +506,8 @@ function Start-MainLoop {
             "7" { Invoke-BackupJobNow }
             "8" { Show-AllBackupJobs }
             "9" { Show-BackupStatus }
+            "R" { Invoke-ReauthenticateAllDestinations }
+            "T" { Test-DestinationCredentials }
             "U" { Invoke-SelfUpdate }
             "0" {
                 Write-Host "`nExiting Resilience Ring..." -ForegroundColor Cyan
