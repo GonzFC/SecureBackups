@@ -663,15 +663,15 @@ function Invoke-FileBackup {
         # Connect to SMB share
         if (-not (Connect-SmbShare -Job $Job)) {
             Write-Log "Failed to connect to destination share" -Level ERROR
-            Disconnect-Tailscale
+            Disconnect-Tailscale | Out-Null
             return $false
         }
 
         # Verify destination is accessible
         if (-not (Test-Path $Job.DestinationPath)) {
             Write-Log "Destination path not accessible: $($Job.DestinationPath)" -Level ERROR
-            Disconnect-SmbShare -Job $Job
-            Disconnect-Tailscale
+            Disconnect-SmbShare -Job $Job | Out-Null
+            Disconnect-Tailscale | Out-Null
             return $false
         }
 
@@ -727,10 +727,10 @@ function Invoke-FileBackup {
                 Invoke-RetentionPolicy -DestinationFolder $destinationFolder -Retention $Job.Retention
 
                 # Disconnect from SMB share
-                Disconnect-SmbShare -Job $Job
+                Disconnect-SmbShare -Job $Job | Out-Null
 
                 # Bring down Tailscale connection
-                Disconnect-Tailscale
+                Disconnect-Tailscale | Out-Null
 
                 return $true
             }
@@ -741,8 +741,8 @@ function Invoke-FileBackup {
                 Send-BackupReport -JobName $Job.JobName -Status 'ChecksumMismatch' -ChecksumResult $checksumResult -ErrorMessage $checksumResult.Reason
 
                 # Still disconnect cleanly
-                Disconnect-SmbShare -Job $Job
-                Disconnect-Tailscale
+                Disconnect-SmbShare -Job $Job | Out-Null
+                Disconnect-Tailscale | Out-Null
 
                 return $false
             }
@@ -753,8 +753,8 @@ function Invoke-FileBackup {
             # Report failure to VLABS Monitor
             Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage "Robocopy exit code: $LASTEXITCODE"
 
-            Disconnect-SmbShare -Job $Job
-            Disconnect-Tailscale
+            Disconnect-SmbShare -Job $Job | Out-Null
+            Disconnect-Tailscale | Out-Null
             return $false
         }
     }
@@ -764,8 +764,8 @@ function Invoke-FileBackup {
         # Report failure to VLABS Monitor
         Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage $_.ToString()
 
-        Disconnect-SmbShare -Job $Job
-        Disconnect-Tailscale
+        Disconnect-SmbShare -Job $Job | Out-Null
+        Disconnect-Tailscale | Out-Null
         return $false
     }
 }
@@ -794,15 +794,15 @@ function Invoke-DirectoryBackup {
         # Connect to SMB share
         if (-not (Connect-SmbShare -Job $Job)) {
             Write-Log "Failed to connect to destination share" -Level ERROR
-            Disconnect-Tailscale
+            Disconnect-Tailscale | Out-Null
             return $false
         }
 
         # Verify destination is accessible
         if (-not (Test-Path $Job.DestinationPath)) {
             Write-Log "Destination path not accessible: $($Job.DestinationPath)" -Level ERROR
-            Disconnect-SmbShare -Job $Job
-            Disconnect-Tailscale
+            Disconnect-SmbShare -Job $Job | Out-Null
+            Disconnect-Tailscale | Out-Null
             return $false
         }
 
@@ -854,10 +854,10 @@ function Invoke-DirectoryBackup {
                 Send-BackupReport -JobName $Job.JobName -Status 'Success' -ChecksumResult $checksumResult
 
                 # Disconnect from SMB share
-                Disconnect-SmbShare -Job $Job
+                Disconnect-SmbShare -Job $Job | Out-Null
 
                 # Bring down Tailscale connection
-                Disconnect-Tailscale
+                Disconnect-Tailscale | Out-Null
 
                 return $true
             }
@@ -867,8 +867,8 @@ function Invoke-DirectoryBackup {
                 # Report checksum failure to VLABS Monitor
                 Send-BackupReport -JobName $Job.JobName -Status 'ChecksumMismatch' -ChecksumResult $checksumResult -ErrorMessage $checksumResult.Reason
 
-                Disconnect-SmbShare -Job $Job
-                Disconnect-Tailscale
+                Disconnect-SmbShare -Job $Job | Out-Null
+                Disconnect-Tailscale | Out-Null
                 return $false
             }
         }
@@ -878,8 +878,8 @@ function Invoke-DirectoryBackup {
             # Report failure to VLABS Monitor
             Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage "Robocopy exit code: $LASTEXITCODE"
 
-            Disconnect-SmbShare -Job $Job
-            Disconnect-Tailscale
+            Disconnect-SmbShare -Job $Job | Out-Null
+            Disconnect-Tailscale | Out-Null
             return $false
         }
     }
@@ -889,8 +889,8 @@ function Invoke-DirectoryBackup {
         # Report failure to VLABS Monitor
         Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage $_.ToString()
 
-        Disconnect-SmbShare -Job $Job
-        Disconnect-Tailscale
+        Disconnect-SmbShare -Job $Job | Out-Null
+        Disconnect-Tailscale | Out-Null
         return $false
     }
 }
@@ -919,15 +919,15 @@ function Invoke-SqlBackup {
         # Connect to SMB share
         if (-not (Connect-SmbShare -Job $Job)) {
             Write-Log "Failed to connect to destination share" -Level ERROR
-            Disconnect-Tailscale
+            Disconnect-Tailscale | Out-Null
             return $false
         }
 
         # Verify destination is accessible
         if (-not (Test-Path $Job.DestinationPath)) {
             Write-Log "Destination path not accessible: $($Job.DestinationPath)" -Level ERROR
-            Disconnect-SmbShare -Job $Job
-            Disconnect-Tailscale
+            Disconnect-SmbShare -Job $Job | Out-Null
+            Disconnect-Tailscale | Out-Null
             return $false
         }
 
@@ -978,8 +978,8 @@ function Invoke-SqlBackup {
                 # Report success to VLABS Monitor
                 Send-BackupReport -JobName $Job.JobName -Status 'Success' -ChecksumResult $checksumResult
 
-                Disconnect-SmbShare -Job $Job
-                Disconnect-Tailscale
+                Disconnect-SmbShare -Job $Job | Out-Null
+                Disconnect-Tailscale | Out-Null
                 return $true
             }
             else {
@@ -988,8 +988,8 @@ function Invoke-SqlBackup {
                 # Report checksum failure to VLABS Monitor
                 Send-BackupReport -JobName $Job.JobName -Status 'ChecksumMismatch' -ChecksumResult $checksumResult -ErrorMessage $checksumResult.Reason
 
-                Disconnect-SmbShare -Job $Job
-                Disconnect-Tailscale
+                Disconnect-SmbShare -Job $Job | Out-Null
+                Disconnect-Tailscale | Out-Null
                 return $false
             }
         }
@@ -999,8 +999,8 @@ function Invoke-SqlBackup {
             # Report failure to VLABS Monitor
             Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage "Robocopy exit code: $LASTEXITCODE"
 
-            Disconnect-SmbShare -Job $Job
-            Disconnect-Tailscale
+            Disconnect-SmbShare -Job $Job | Out-Null
+            Disconnect-Tailscale | Out-Null
             return $false
         }
     }
@@ -1010,8 +1010,8 @@ function Invoke-SqlBackup {
         # Report failure to VLABS Monitor
         Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage $_.ToString()
 
-        Disconnect-SmbShare -Job $Job
-        Disconnect-Tailscale
+        Disconnect-SmbShare -Job $Job | Out-Null
+        Disconnect-Tailscale | Out-Null
         return $false
     }
 }
@@ -1105,13 +1105,17 @@ function Invoke-BackupJob {
     try {
         switch ($job.BackupType) {
             "F" {
-                $success = Invoke-FileBackup -Job $job
+                # Capture only the boolean return value, suppress other output
+                $result = Invoke-FileBackup -Job $job
+                $success = ($result -eq $true)
             }
             "D" {
-                $success = Invoke-DirectoryBackup -Job $job
+                $result = Invoke-DirectoryBackup -Job $job
+                $success = ($result -eq $true)
             }
             "SQL" {
-                $success = Invoke-SqlBackup -Job $job
+                $result = Invoke-SqlBackup -Job $job
+                $success = ($result -eq $true)
             }
             default {
                 Write-Log "Unknown backup type: $($job.BackupType)" -Level ERROR
@@ -1124,11 +1128,16 @@ function Invoke-BackupJob {
         $success = $false
     }
 
+    # Ensure $success is strictly boolean
+    if ($success -ne $true) {
+        $success = $false
+    }
+
     # Update final status
-    $finalStatus = if ($success) { "Success" } else { "Failed" }
+    $finalStatus = if ($success -eq $true) { "Success" } else { "Failed" }
     Update-JobStatus -JobName $JobName -Status $finalStatus
 
-    Write-Log "=== Backup Job Execution Completed: $JobName - Status: $finalStatus ===" -Level $(if($success){'SUCCESS'}else{'ERROR'})
+    Write-Log "=== Backup Job Execution Completed: $JobName - Status: $finalStatus ===" -Level $(if($success -eq $true){'SUCCESS'}else{'ERROR'})
 
     return $success
 }
