@@ -27,8 +27,8 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.1.2'
-$script:AppName = 'Resilience Ring'
+$script:AppVersion = '1.1.3'
+$script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
 $script:RepoBranch = 'main'
@@ -290,12 +290,10 @@ function Show-Banner {
     Clear-Host
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "         RESILIENCE RING" -ForegroundColor Cyan
+    Write-Host "      VLABS RESILIENCE RING" -ForegroundColor Cyan
     Write-Host "    Distributed Backup System" -ForegroundColor Cyan
-    Write-Host "         v$script:AppVersion" -ForegroundColor Cyan
+    Write-Host "            v$script:AppVersion" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "         Powered by VLABS" -ForegroundColor DarkGray
     Write-Host ""
 }
 
@@ -458,8 +456,9 @@ else {
 function Show-MainMenu {
     Clear-Host
     Write-Host "`n========================================" -ForegroundColor Cyan
-    Write-Host "         RESILIENCE RING v$script:AppVersion" -ForegroundColor Cyan
+    Write-Host "      VLABS RESILIENCE RING" -ForegroundColor Cyan
     Write-Host "    Distributed Backup System" -ForegroundColor Cyan
+    Write-Host "            v$script:AppVersion" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
 
     Write-Host " DESTINATIONS" -ForegroundColor Yellow

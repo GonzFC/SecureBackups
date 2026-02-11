@@ -38,11 +38,9 @@ function Write-ColorOutput {
 Clear-Host
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "         RESILIENCE RING" -ForegroundColor Cyan
+Write-Host "      VLABS RESILIENCE RING" -ForegroundColor Cyan
 Write-Host "    Distributed Backup System" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "         Powered by VLABS" -ForegroundColor DarkGray
 Write-Host ""
 
 # Check if running as Administrator
