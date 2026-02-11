@@ -18,6 +18,225 @@ $script:ConfigPath = "C:\VLABS_SecureBackups"
 $script:JobsFile = Join-Path $ConfigPath "jobs.json"
 $script:LogPath = Join-Path $ConfigPath "Logs"
 
+# VLABS Monitor Configuration (for future integration)
+$script:VlabsMonitorUrl = $env:VLABS_MONITOR_URL  # e.g., "http://100.x.x.x:8080/api"
+$script:VlabsMonitorEnabled = $false  # Will be enabled when VLABS Monitor is deployed
+
+#region Checksum Functions
+
+function Get-FileChecksum {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$FilePath
+    )
+
+    try {
+        if (-not (Test-Path $FilePath -PathType Leaf)) {
+            Write-Log "Cannot calculate checksum - file not found: $FilePath" -Level WARNING
+            return $null
+        }
+
+        $hash = Get-FileHash -Path $FilePath -Algorithm SHA256 -ErrorAction Stop
+        return $hash.Hash
+    }
+    catch {
+        Write-Log "Error calculating checksum for $FilePath : $_" -Level ERROR
+        return $null
+    }
+}
+
+function Get-DirectoryChecksum {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$DirectoryPath,
+
+        [int]$MaxFiles = 100  # Limit for performance
+    )
+
+    try {
+        if (-not (Test-Path $DirectoryPath -PathType Container)) {
+            Write-Log "Cannot calculate checksum - directory not found: $DirectoryPath" -Level WARNING
+            return $null
+        }
+
+        $checksums = @{}
+        $files = Get-ChildItem -Path $DirectoryPath -File -Recurse -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime -Descending |
+                 Select-Object -First $MaxFiles
+
+        foreach ($file in $files) {
+            $relativePath = $file.FullName.Substring($DirectoryPath.Length).TrimStart('\')
+            $hash = Get-FileHash -Path $file.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue
+            if ($hash) {
+                $checksums[$relativePath] = $hash.Hash
+            }
+        }
+
+        return $checksums
+    }
+    catch {
+        Write-Log "Error calculating directory checksums: $_" -Level ERROR
+        return $null
+    }
+}
+
+function Test-ChecksumMatch {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$DestinationPath,
+
+        [ValidateSet('File','Directory')]
+        [string]$Type = 'File'
+    )
+
+    try {
+        Write-Log "Verifying checksum integrity..." -Level INFO
+
+        if ($Type -eq 'File') {
+            $sourceHash = Get-FileChecksum -FilePath $SourcePath
+            $destHash = Get-FileChecksum -FilePath $DestinationPath
+
+            if ($null -eq $sourceHash -or $null -eq $destHash) {
+                Write-Log "Could not calculate checksums for verification" -Level WARNING
+                return @{ Success = $false; Reason = "Checksum calculation failed" }
+            }
+
+            if ($sourceHash -eq $destHash) {
+                Write-Log "Checksum verification PASSED: $sourceHash" -Level SUCCESS
+                return @{ Success = $true; SourceHash = $sourceHash; DestHash = $destHash }
+            }
+            else {
+                Write-Log "Checksum MISMATCH! Source: $sourceHash, Dest: $destHash" -Level ERROR
+                return @{ Success = $false; Reason = "Hash mismatch"; SourceHash = $sourceHash; DestHash = $destHash }
+            }
+        }
+        else {
+            # Directory comparison - sample verification
+            $sourceChecksums = Get-DirectoryChecksum -DirectoryPath $SourcePath
+            $destChecksums = Get-DirectoryChecksum -DirectoryPath $DestinationPath
+
+            if ($null -eq $sourceChecksums -or $null -eq $destChecksums) {
+                Write-Log "Could not calculate directory checksums" -Level WARNING
+                return @{ Success = $false; Reason = "Directory checksum calculation failed" }
+            }
+
+            $mismatches = @()
+            foreach ($file in $sourceChecksums.Keys) {
+                if ($destChecksums.ContainsKey($file)) {
+                    if ($sourceChecksums[$file] -ne $destChecksums[$file]) {
+                        $mismatches += $file
+                    }
+                }
+            }
+
+            if ($mismatches.Count -eq 0) {
+                Write-Log "Directory checksum verification PASSED ($($sourceChecksums.Count) files verified)" -Level SUCCESS
+                return @{ Success = $true; FilesVerified = $sourceChecksums.Count }
+            }
+            else {
+                Write-Log "Directory checksum MISMATCH! $($mismatches.Count) files differ" -Level ERROR
+                return @{ Success = $false; Reason = "Files with mismatches: $($mismatches -join ', ')"; MismatchCount = $mismatches.Count }
+            }
+        }
+    }
+    catch {
+        Write-Log "Error during checksum verification: $_" -Level ERROR
+        return @{ Success = $false; Reason = $_.ToString() }
+    }
+}
+
+#endregion
+
+#region VLABS Monitor Reporting (Prepared for future integration)
+
+function Send-BackupReport {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$JobName,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateSet('Success','Failed','ChecksumMismatch')]
+        [string]$Status,
+
+        [hashtable]$ChecksumResult = $null,
+
+        [string]$ErrorMessage = $null,
+
+        [long]$BytesTransferred = 0,
+
+        [int]$DurationSeconds = 0
+    )
+
+    # Skip if VLABS Monitor is not configured
+    if (-not $script:VlabsMonitorEnabled -or [string]::IsNullOrEmpty($script:VlabsMonitorUrl)) {
+        Write-Log "VLABS Monitor reporting skipped (not configured)" -Level INFO
+        return $true
+    }
+
+    try {
+        $report = @{
+            timestamp = (Get-Date).ToString("o")
+            hostname = $env:COMPUTERNAME
+            jobName = $JobName
+            status = $Status
+            bytesTransferred = $BytesTransferred
+            durationSeconds = $DurationSeconds
+            checksumVerified = ($null -ne $ChecksumResult -and $ChecksumResult.Success)
+            errorMessage = $ErrorMessage
+        }
+
+        $json = $report | ConvertTo-Json -Compress
+        $endpoint = "$script:VlabsMonitorUrl/backup/result"
+
+        Write-Log "Sending backup report to VLABS Monitor..." -Level INFO
+
+        $response = Invoke-RestMethod -Uri $endpoint -Method Post -Body $json -ContentType "application/json" -TimeoutSec 10 -ErrorAction Stop
+
+        Write-Log "Backup report sent successfully" -Level SUCCESS
+        return $true
+    }
+    catch {
+        Write-Log "Failed to send report to VLABS Monitor: $_" -Level WARNING
+        # Don't fail the backup if reporting fails
+        return $false
+    }
+}
+
+function Send-Heartbeat {
+    param(
+        [string]$JobName = $null
+    )
+
+    if (-not $script:VlabsMonitorEnabled -or [string]::IsNullOrEmpty($script:VlabsMonitorUrl)) {
+        return $true
+    }
+
+    try {
+        $heartbeat = @{
+            timestamp = (Get-Date).ToString("o")
+            hostname = $env:COMPUTERNAME
+            jobName = $JobName
+            status = "alive"
+        }
+
+        $json = $heartbeat | ConvertTo-Json -Compress
+        $endpoint = "$script:VlabsMonitorUrl/heartbeat"
+
+        Invoke-RestMethod -Uri $endpoint -Method Post -Body $json -ContentType "application/json" -TimeoutSec 5 -ErrorAction Stop
+
+        return $true
+    }
+    catch {
+        Write-Log "Failed to send heartbeat: $_" -Level WARNING
+        return $false
+    }
+}
+
+#endregion
+
 #region Logging Functions
 
 function Write-Log {
@@ -488,25 +707,52 @@ function Invoke-FileBackup {
         if ($LASTEXITCODE -le 7) {
             # Rename the copied file to include timestamp
             $copiedFile = Join-Path $destinationFolder $sourceFile.Name
+            $finalDestFile = Join-Path $destinationFolder $fileName
             if (Test-Path $copiedFile) {
                 Rename-Item -Path $copiedFile -NewName $fileName -Force -ErrorAction Stop
             }
 
-            Write-Log "File backup completed successfully" -Level SUCCESS
+            Write-Log "File copy completed, verifying integrity..." -Level INFO
 
-            # Apply retention policy
-            Invoke-RetentionPolicy -DestinationFolder $destinationFolder -Retention $Job.Retention
+            # Checksum verification
+            $checksumResult = Test-ChecksumMatch -SourcePath $sourceFile.FullName -DestinationPath $finalDestFile -Type 'File'
 
-            # Disconnect from SMB share
-            Disconnect-SmbShare -Job $Job
+            if ($checksumResult.Success) {
+                Write-Log "File backup completed successfully with verified integrity" -Level SUCCESS
 
-            # Bring down Tailscale connection
-            Disconnect-Tailscale
+                # Report success to VLABS Monitor
+                Send-BackupReport -JobName $Job.JobName -Status 'Success' -ChecksumResult $checksumResult
 
-            return $true
+                # Apply retention policy
+                Invoke-RetentionPolicy -DestinationFolder $destinationFolder -Retention $Job.Retention
+
+                # Disconnect from SMB share
+                Disconnect-SmbShare -Job $Job
+
+                # Bring down Tailscale connection
+                Disconnect-Tailscale
+
+                return $true
+            }
+            else {
+                Write-Log "CHECKSUM MISMATCH - Backup integrity verification FAILED!" -Level ERROR
+
+                # Report checksum failure to VLABS Monitor
+                Send-BackupReport -JobName $Job.JobName -Status 'ChecksumMismatch' -ChecksumResult $checksumResult -ErrorMessage $checksumResult.Reason
+
+                # Still disconnect cleanly
+                Disconnect-SmbShare -Job $Job
+                Disconnect-Tailscale
+
+                return $false
+            }
         }
         else {
             Write-Log "Robocopy failed with exit code: $LASTEXITCODE" -Level ERROR
+
+            # Report failure to VLABS Monitor
+            Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage "Robocopy exit code: $LASTEXITCODE"
+
             Disconnect-SmbShare -Job $Job
             Disconnect-Tailscale
             return $false
@@ -514,6 +760,10 @@ function Invoke-FileBackup {
     }
     catch {
         Write-Log "Error during file backup: $_" -Level ERROR
+
+        # Report failure to VLABS Monitor
+        Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage $_.ToString()
+
         Disconnect-SmbShare -Job $Job
         Disconnect-Tailscale
         return $false
@@ -592,18 +842,42 @@ function Invoke-DirectoryBackup {
 
         # Robocopy exit codes: 0-7 are success
         if ($LASTEXITCODE -le 7) {
-            Write-Log "Directory synchronization completed successfully" -Level SUCCESS
+            Write-Log "Directory sync completed, verifying integrity (sampling)..." -Level INFO
 
-            # Disconnect from SMB share
-            Disconnect-SmbShare -Job $Job
+            # Checksum verification (samples recent files)
+            $checksumResult = Test-ChecksumMatch -SourcePath $Job.BackupObject -DestinationPath $destinationFolder -Type 'Directory'
 
-            # Bring down Tailscale connection
-            Disconnect-Tailscale
+            if ($checksumResult.Success) {
+                Write-Log "Directory synchronization completed with verified integrity ($($checksumResult.FilesVerified) files sampled)" -Level SUCCESS
 
-            return $true
+                # Report success to VLABS Monitor
+                Send-BackupReport -JobName $Job.JobName -Status 'Success' -ChecksumResult $checksumResult
+
+                # Disconnect from SMB share
+                Disconnect-SmbShare -Job $Job
+
+                # Bring down Tailscale connection
+                Disconnect-Tailscale
+
+                return $true
+            }
+            else {
+                Write-Log "CHECKSUM MISMATCH - Directory integrity verification FAILED!" -Level ERROR
+
+                # Report checksum failure to VLABS Monitor
+                Send-BackupReport -JobName $Job.JobName -Status 'ChecksumMismatch' -ChecksumResult $checksumResult -ErrorMessage $checksumResult.Reason
+
+                Disconnect-SmbShare -Job $Job
+                Disconnect-Tailscale
+                return $false
+            }
         }
         else {
             Write-Log "Robocopy failed with exit code: $LASTEXITCODE" -Level ERROR
+
+            # Report failure to VLABS Monitor
+            Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage "Robocopy exit code: $LASTEXITCODE"
+
             Disconnect-SmbShare -Job $Job
             Disconnect-Tailscale
             return $false
@@ -611,6 +885,10 @@ function Invoke-DirectoryBackup {
     }
     catch {
         Write-Log "Error during directory backup: $_" -Level ERROR
+
+        # Report failure to VLABS Monitor
+        Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage $_.ToString()
+
         Disconnect-SmbShare -Job $Job
         Disconnect-Tailscale
         return $false
@@ -689,13 +967,38 @@ function Invoke-SqlBackup {
 
         # Robocopy exit codes: 0-7 are success
         if ($LASTEXITCODE -le 7) {
-            Write-Log "SQL backup synchronization completed successfully" -Level SUCCESS
-            Disconnect-SmbShare -Job $Job
-            Disconnect-Tailscale
-            return $true
+            Write-Log "SQL backup sync completed, verifying integrity (sampling)..." -Level INFO
+
+            # Checksum verification (samples recent files - SQL backups are critical)
+            $checksumResult = Test-ChecksumMatch -SourcePath $Job.BackupObject -DestinationPath $destinationFolder -Type 'Directory'
+
+            if ($checksumResult.Success) {
+                Write-Log "SQL backup synchronization completed with verified integrity ($($checksumResult.FilesVerified) files sampled)" -Level SUCCESS
+
+                # Report success to VLABS Monitor
+                Send-BackupReport -JobName $Job.JobName -Status 'Success' -ChecksumResult $checksumResult
+
+                Disconnect-SmbShare -Job $Job
+                Disconnect-Tailscale
+                return $true
+            }
+            else {
+                Write-Log "CHECKSUM MISMATCH - SQL backup integrity verification FAILED!" -Level ERROR
+
+                # Report checksum failure to VLABS Monitor
+                Send-BackupReport -JobName $Job.JobName -Status 'ChecksumMismatch' -ChecksumResult $checksumResult -ErrorMessage $checksumResult.Reason
+
+                Disconnect-SmbShare -Job $Job
+                Disconnect-Tailscale
+                return $false
+            }
         }
         else {
             Write-Log "Robocopy failed with exit code: $LASTEXITCODE" -Level ERROR
+
+            # Report failure to VLABS Monitor
+            Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage "Robocopy exit code: $LASTEXITCODE"
+
             Disconnect-SmbShare -Job $Job
             Disconnect-Tailscale
             return $false
@@ -703,6 +1006,10 @@ function Invoke-SqlBackup {
     }
     catch {
         Write-Log "Error during SQL backup synchronization: $_" -Level ERROR
+
+        # Report failure to VLABS Monitor
+        Send-BackupReport -JobName $Job.JobName -Status 'Failed' -ErrorMessage $_.ToString()
+
         Disconnect-SmbShare -Job $Job
         Disconnect-Tailscale
         return $false
