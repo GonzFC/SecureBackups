@@ -27,7 +27,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.1.0'
+$script:AppVersion = '1.1.1'
 $script:AppName = 'Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -340,31 +340,113 @@ function Initialize-Environment {
 
 #endregion
 
-#region Core Functions (from VLABS-SecureBackup.ps1)
+#region Logging Functions
 
-# Load the core functionality from the legacy script
-$legacyScript = Join-Path $PSScriptRoot "VLABS-SecureBackup.ps1"
-if (Test-Path $legacyScript) {
-    # Read and filter out the parts we've replaced (banner, menu loop, initialization)
-    $legacyContent = Get-Content $legacyScript -Raw
+function Write-Log {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Message,
 
-    # Extract just the function definitions (regions between #region and #endregion)
-    # We'll execute specific functions we need
-
-    # For now, dot-source the main menu function by extracting it
-    # Actually, let's just define that the main menu calls back to the legacy script's functions
-
-    # Simpler approach: load all functions from legacy script except main entry point
-    $functionsToLoad = $legacyContent -replace '(?s)#region Main Entry Point.*$', ''
-    $functionsToLoad = $functionsToLoad -replace '(?s)^#Requires.*?\n', ''
-    $functionsToLoad = $functionsToLoad -replace '(?s)<#.*?#>', ''
+        [ValidateSet('INFO','WARNING','ERROR','SUCCESS')]
+        [string]$Level = 'INFO'
+    )
 
     try {
-        Invoke-Expression $functionsToLoad
+        if (-not (Test-Path $script:LogPath)) {
+            New-Item -Path $script:LogPath -ItemType Directory -Force | Out-Null
+        }
+        
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $logFile = Join-Path $script:LogPath "ResilienceRing_$(Get-Date -Format 'yyyyMMdd').log"
+        $logEntry = "[$timestamp] [$Level] $Message"
+
+        Add-Content -Path $logFile -Value $logEntry -ErrorAction Stop
     }
     catch {
-        Write-Host "Warning: Could not load all legacy functions: $_" -ForegroundColor Yellow
+        # Silently continue if logging fails
     }
+}
+
+function Invoke-LogArchival {
+    try {
+        if (-not (Test-Path $script:LogPath)) { return }
+        
+        $sevenDaysAgo = (Get-Date).AddDays(-7)
+        $logFiles = Get-ChildItem -Path $script:LogPath -Filter "*.log" -ErrorAction SilentlyContinue | 
+                    Where-Object { $_.LastWriteTime -lt $sevenDaysAgo }
+
+        if ($logFiles.Count -gt 0) {
+            $monthYear = Get-Date -Format "yyyy-MM"
+            $zipFileName = "ResilienceRing_Logs_$monthYear.zip"
+            $zipFilePath = Join-Path $script:LogPath $zipFileName
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+
+            foreach ($logFile in $logFiles) {
+                try {
+                    if (Test-Path $zipFilePath) {
+                        $zip = [System.IO.Compression.ZipFile]::Open($zipFilePath, 'Update')
+                    }
+                    else {
+                        $zip = [System.IO.Compression.ZipFile]::Open($zipFilePath, 'Create')
+                    }
+
+                    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $logFile.FullName, $logFile.Name) | Out-Null
+                    $zip.Dispose()
+
+                    Remove-Item $logFile.FullName -Force
+                }
+                catch {
+                    if ($zip) { $zip.Dispose() }
+                }
+            }
+        }
+
+        # Keep only last 3 monthly archives
+        $zipFiles = Get-ChildItem -Path $script:LogPath -Filter "ResilienceRing_Logs_*.zip" -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending |
+                    Select-Object -Skip 3
+
+        foreach ($zipFile in $zipFiles) {
+            Remove-Item $zipFile.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    catch {
+        # Log archival is non-critical
+    }
+}
+
+#endregion
+
+#region Core Functions - Load from Legacy Script
+
+# Dot-source the legacy script to get all the backup functions
+$legacyScript = Join-Path $PSScriptRoot "VLABS-SecureBackup.ps1"
+if (Test-Path $legacyScript) {
+    # We need to load the functions but not execute the main entry point
+    # Read the script, remove the main execution block, then invoke
+    $legacyContent = Get-Content $legacyScript -Raw
+    
+    # Remove the #Requires directive (we handle admin check ourselves)
+    $legacyContent = $legacyContent -replace '#Requires -RunAsAdministrator', ''
+    
+    # Remove everything after "# Main entry point" or "# Initialize and start"
+    $legacyContent = $legacyContent -replace '(?s)#region Main Entry Point.*', ''
+    $legacyContent = $legacyContent -replace '(?s)# Initialize and start.*', ''
+    $legacyContent = $legacyContent -replace '(?s)# Main entry point.*', ''
+    
+    try {
+        # Execute the content to define all functions
+        . ([ScriptBlock]::Create($legacyContent))
+        Write-Host "[OK] Core functions loaded" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "[WARN] Some legacy functions may not be available: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+else {
+    Write-Host "[ERROR] Legacy script not found: $legacyScript" -ForegroundColor Red
+    Write-Host "Please ensure VLABS-SecureBackup.ps1 is in the same directory." -ForegroundColor Yellow
 }
 
 #endregion
