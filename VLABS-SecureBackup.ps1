@@ -1431,20 +1431,27 @@ function Start-MainLoop {
 
 #region Main Entry Point
 
-# Initialize and start
-Write-Host "`n===============================================" -ForegroundColor Cyan
-Write-Host "    VLABS SECURE BACKUP TOOL - INITIALIZING" -ForegroundColor Cyan
-Write-Host "===============================================`n" -ForegroundColor Cyan
+# Only run the main loop if this script is executed directly (not dot-sourced/imported)
+# Check if we're being dot-sourced by looking at the invocation
+$scriptName = $MyInvocation.MyCommand.Name
+$isDirectExecution = ($scriptName -eq 'VLABS-SecureBackup.ps1') -or ($scriptName -eq $null -and $MyInvocation.Line -notmatch '^\s*\.')
 
-if (Initialize-Environment) {
-    Write-Host "Initialization complete!" -ForegroundColor Green
-    Write-Log "Application started" -Level INFO
-    Start-Sleep -Seconds 1
-    Start-MainLoop
-}
-else {
-    Write-Host "`nFailed to initialize. Exiting..." -ForegroundColor Red
-    exit 1
+if ($isDirectExecution -and -not $env:RESILIENCE_RING_IMPORT) {
+    # Initialize and start
+    Write-Host "`n===============================================" -ForegroundColor Cyan
+    Write-Host "    VLABS SECURE BACKUP TOOL - INITIALIZING" -ForegroundColor Cyan
+    Write-Host "===============================================`n" -ForegroundColor Cyan
+
+    if (Initialize-Environment) {
+        Write-Host "Initialization complete!" -ForegroundColor Green
+        Write-Log "Application started" -Level INFO
+        Start-Sleep -Seconds 1
+        Start-MainLoop
+    }
+    else {
+        Write-Host "`nFailed to initialize. Exiting..." -ForegroundColor Red
+        exit 1
+    }
 }
 
 #endregion

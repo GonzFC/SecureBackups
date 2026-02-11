@@ -27,7 +27,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.1.1'
+$script:AppVersion = '1.1.2'
 $script:AppName = 'Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -423,30 +423,32 @@ function Invoke-LogArchival {
 # Dot-source the legacy script to get all the backup functions
 $legacyScript = Join-Path $PSScriptRoot "VLABS-SecureBackup.ps1"
 if (Test-Path $legacyScript) {
-    # We need to load the functions but not execute the main entry point
-    # Read the script, remove the main execution block, then invoke
-    $legacyContent = Get-Content $legacyScript -Raw
-    
-    # Remove the #Requires directive (we handle admin check ourselves)
-    $legacyContent = $legacyContent -replace '#Requires -RunAsAdministrator', ''
-    
-    # Remove everything after "# Main entry point" or "# Initialize and start"
-    $legacyContent = $legacyContent -replace '(?s)#region Main Entry Point.*', ''
-    $legacyContent = $legacyContent -replace '(?s)# Initialize and start.*', ''
-    $legacyContent = $legacyContent -replace '(?s)# Main entry point.*', ''
-    
     try {
-        # Execute the content to define all functions
-        . ([ScriptBlock]::Create($legacyContent))
+        # Set environment variable to prevent legacy script from running its main loop
+        $env:RESILIENCE_RING_IMPORT = "1"
+        
+        # Dot-source to load all functions into current scope
+        . $legacyScript
+        
+        # Clear the environment variable
+        Remove-Item Env:RESILIENCE_RING_IMPORT -ErrorAction SilentlyContinue
+        
         Write-Host "[OK] Core functions loaded" -ForegroundColor Green
     }
     catch {
-        Write-Host "[WARN] Some legacy functions may not be available: $($_.Exception.Message)" -ForegroundColor Yellow
+        Remove-Item Env:RESILIENCE_RING_IMPORT -ErrorAction SilentlyContinue
+        Write-Host "[ERROR] Failed to load core functions: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host ""
+        Read-Host "Press Enter to exit"
+        exit 1
     }
 }
 else {
-    Write-Host "[ERROR] Legacy script not found: $legacyScript" -ForegroundColor Red
+    Write-Host "[ERROR] Core script not found: $legacyScript" -ForegroundColor Red
     Write-Host "Please ensure VLABS-SecureBackup.ps1 is in the same directory." -ForegroundColor Yellow
+    Write-Host ""
+    Read-Host "Press Enter to exit"
+    exit 1
 }
 
 #endregion
