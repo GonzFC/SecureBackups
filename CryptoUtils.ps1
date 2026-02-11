@@ -259,15 +259,4 @@ function Test-PasswordDecryption {
 
 #endregion
 
-#region Export
-
-# Make functions available when dot-sourced
-Export-ModuleMember -Function @(
-    'Protect-Password',
-    'Unprotect-Password',
-    'Test-PasswordDecryption',
-    'ConvertTo-AesEncryptedString',
-    'ConvertFrom-AesEncryptedString'
-) -ErrorAction SilentlyContinue
-
-#endregion
+# Functions are automatically available when this script is dot-sourced
