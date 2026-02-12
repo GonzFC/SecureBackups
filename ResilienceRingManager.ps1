@@ -25,7 +25,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.0.4'
+$script:AppVersion = '1.0.5'
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -287,8 +287,18 @@ function Get-PeerData {
         else {
             # Generate service account password from customer code
             $password = Get-RRMServicePassword -CustomerCode $CustomerCode
-            $netResult = net use $sharePath /user:RR_Service $password 2>&1
-            if ($LASTEXITCODE -ne 0) {
+            
+            # Try to connect - capture all output
+            try {
+                $netResult = cmd /c "net use `"$sharePath`" /user:RR_Service `"$password`" 2>&1"
+                $exitCode = $LASTEXITCODE
+            }
+            catch {
+                $result.Error = "Exception: $_"
+                return $result
+            }
+            
+            if ($exitCode -ne 0) {
                 # Store error for debugging
                 $result.Error = "$netResult"
                 Write-Log "Failed to connect to $TailscaleIP : $netResult" -Level WARNING
@@ -323,6 +333,7 @@ function Get-PeerData {
         
     }
     catch {
+        $result.Error = "$_"
         Write-Log "Error getting peer data from $TailscaleIP : $_" -Level ERROR
     }
     finally {
