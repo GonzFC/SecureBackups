@@ -25,7 +25,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.0.7'
+$script:AppVersion = '1.0.8'
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -197,20 +197,51 @@ function Get-TailscalePeersByTag {
         $status = tailscale status --json 2>$null | ConvertFrom-Json
         $peers = @()
 
+        # Normalize tag format
+        $tagWithPrefix = if ($Tag.StartsWith("tag:")) { $Tag } else { "tag:$Tag" }
+        $tagWithoutPrefix = $Tag -replace '^tag:', ''
+
+        # Check Self (local machine) first - it might have the tag too!
+        if ($status.Self.Tags) {
+            $selfHasTag = $status.Self.Tags | Where-Object { $_ -eq $tagWithPrefix -or $_ -eq $tagWithoutPrefix }
+            if ($selfHasTag) {
+                # Extract Tailscale hostname from DNSName (remove .tail*****.ts.net suffix)
+                $tsHostname = $status.Self.DNSName -replace '\..*$', ''
+                $peers += [PSCustomObject]@{
+                    ID = $status.Self.ID
+                    HostName = $tsHostname
+                    DNSName = $status.Self.DNSName
+                    TailscaleIP = $status.Self.TailscaleIPs[0]
+                    OS = $status.Self.OS
+                    Online = $true  # Self is always online
+                    LastSeen = (Get-Date).ToString('o')
+                    Tags = $status.Self.Tags
+                    IsSelf = $true
+                }
+            }
+        }
+
+        # Check remote peers
         foreach ($peerProp in $status.Peer.PSObject.Properties) {
             $peer = $peerProp.Value
 
             # Check if peer has the tag
-            if ($peer.Tags -and ($peer.Tags -contains $Tag -or $peer.Tags -contains "tag:$Tag")) {
-                $peers += [PSCustomObject]@{
-                    ID = $peerProp.Name
-                    HostName = $peer.HostName
-                    DNSName = $peer.DNSName
-                    TailscaleIP = $peer.TailscaleIPs[0]
-                    OS = $peer.OS
-                    Online = $peer.Online
-                    LastSeen = $peer.LastSeen
-                    Tags = $peer.Tags
+            if ($peer.Tags) {
+                $peerHasTag = $peer.Tags | Where-Object { $_ -eq $tagWithPrefix -or $_ -eq $tagWithoutPrefix }
+                if ($peerHasTag) {
+                    # Extract Tailscale hostname from DNSName
+                    $tsHostname = $peer.DNSName -replace '\..*$', ''
+                    $peers += [PSCustomObject]@{
+                        ID = $peerProp.Name
+                        HostName = $tsHostname
+                        DNSName = $peer.DNSName
+                        TailscaleIP = $peer.TailscaleIPs[0]
+                        OS = $peer.OS
+                        Online = $peer.Online
+                        LastSeen = $peer.LastSeen
+                        Tags = $peer.Tags
+                        IsSelf = $false
+                    }
                 }
             }
         }
@@ -870,7 +901,7 @@ function Show-RingSelector {
     }
 
     Write-Host ""
-    Write-Host "  C. Connect to new ring" -ForegroundColor Gray
+    Write-Host "  4. Connect to new ring" -ForegroundColor Gray
     Write-Host "  0. Exit" -ForegroundColor Gray
     Write-Host ""
 
@@ -881,7 +912,7 @@ function Show-RingSelector {
             return $null
         }
 
-        if ($choice.ToUpper() -eq 'C') {
+        if ($choice -eq '4') {
             Connect-ToNewRing
             return Show-RingSelector  # Recurse to show updated list
         }
@@ -923,7 +954,7 @@ function Show-MainMenu {
 
     Write-Host ""
     Write-Host " RING MANAGEMENT" -ForegroundColor Yellow
-    Write-Host "   C. Connect to New Ring" -ForegroundColor White
+    Write-Host "   4. Connect to New Ring" -ForegroundColor White
     Write-Host "   5. Show All Connected Rings" -ForegroundColor White
     Write-Host "   6. Rescan Ring" -ForegroundColor White
 
@@ -944,7 +975,7 @@ function Start-MainLoop {
             "1" { Show-RingStatistics }
             "2" { Show-AllBackupJobs }
             "3" { Show-PeerHealth }
-            "C" { Connect-ToNewRing }
+            "4" { Connect-ToNewRing }
             "5" { Show-AllRings }
             "6" { Invoke-RingRescan }
             "U" { Invoke-RRMUpdate }
