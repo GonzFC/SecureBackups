@@ -25,7 +25,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.0.3'
+$script:AppVersion = '1.0.4'
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -289,6 +289,8 @@ function Get-PeerData {
             $password = Get-RRMServicePassword -CustomerCode $CustomerCode
             $netResult = net use $sharePath /user:RR_Service $password 2>&1
             if ($LASTEXITCODE -ne 0) {
+                # Store error for debugging
+                $result.Error = "$netResult"
                 Write-Log "Failed to connect to $TailscaleIP : $netResult" -Level WARNING
                 return $result
             }
@@ -420,7 +422,8 @@ function Get-RingStatistics {
             }
             else {
                 $peerStats.Status = "Connection Failed"
-                $stats.Problems += "Cannot connect to $($peer.HostName)"
+                $errorDetail = if ($peerData.Error) { $peerData.Error } else { "Unknown error" }
+                $stats.Problems += "Cannot connect to $($peer.HostName): $errorDetail"
                 Write-Host " CONN FAILED" -ForegroundColor Red
             }
         }
