@@ -25,7 +25,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.0.6'
+$script:AppVersion = '1.0.7'
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -756,6 +756,65 @@ function Show-PeerHealth {
     Read-Host "Press Enter to continue"
 }
 
+function Invoke-RingRescan {
+    <#
+    .SYNOPSIS
+        Rescans the active ring to refresh peer data
+    #>
+    if (-not $script:ActiveRing) {
+        Write-Host "No ring selected!" -ForegroundColor Red
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    Clear-Host
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "     RESCAN RING" -ForegroundColor Cyan
+    Write-Host "     $($script:ActiveRing.Name)" -ForegroundColor Cyan
+    Write-Host "========================================`n" -ForegroundColor Cyan
+
+    # Get fresh peer list from Tailscale
+    Write-Host "Scanning Tailscale for peers with tag: $($script:ActiveRing.Tag)" -ForegroundColor Gray
+    $peers = Get-TailscalePeersByTag -Tag $script:ActiveRing.Tag
+
+    if ($peers.Count -eq 0) {
+        Write-Host "`nNo peers found with tag: $($script:ActiveRing.Tag)" -ForegroundColor Red
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    $onlineCount = ($peers | Where-Object { $_.Online }).Count
+    
+    Write-Host ""
+    Write-Host "Found $($peers.Count) peer(s), $onlineCount online:" -ForegroundColor Green
+    Write-Host ""
+
+    foreach ($peer in $peers) {
+        $status = if ($peer.Online) { "[ONLINE]" } else { "[OFFLINE]" }
+        $statusColor = if ($peer.Online) { "Green" } else { "Red" }
+        Write-Host "  $($peer.HostName.PadRight(25)) $($peer.TailscaleIP.PadRight(18)) " -NoNewline
+        Write-Host $status -ForegroundColor $statusColor
+    }
+
+    # Update saved ring data
+    [array]$rings = @(Get-SavedRings)
+    for ($i = 0; $i -lt $rings.Count; $i++) {
+        if ($rings[$i].Tag -eq $script:ActiveRing.Tag) {
+            $rings[$i].PeerCount = $peers.Count
+            $rings[$i].LastScan = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            $script:ActiveRing = $rings[$i]
+            Save-Rings -Rings $rings
+            break
+        }
+    }
+
+    Write-Host ""
+    Write-Host "Ring data updated." -ForegroundColor Green
+    Write-Log "Rescanned ring $($script:ActiveRing.Name): $($peers.Count) peers, $onlineCount online" -Level INFO
+
+    Read-Host "`nPress Enter to continue"
+}
+
 #endregion
 
 #region Ring Selector
@@ -866,6 +925,7 @@ function Show-MainMenu {
     Write-Host " RING MANAGEMENT" -ForegroundColor Yellow
     Write-Host "   C. Connect to New Ring" -ForegroundColor White
     Write-Host "   5. Show All Connected Rings" -ForegroundColor White
+    Write-Host "   6. Rescan Ring" -ForegroundColor White
 
     Write-Host ""
     Write-Host " SYSTEM" -ForegroundColor Yellow
@@ -886,6 +946,7 @@ function Start-MainLoop {
             "3" { Show-PeerHealth }
             "C" { Connect-ToNewRing }
             "5" { Show-AllRings }
+            "6" { Invoke-RingRescan }
             "U" { Invoke-RRMUpdate }
             "0" {
                 Write-Host "`nExiting Ring Manager..." -ForegroundColor Cyan
@@ -956,6 +1017,29 @@ if (-not $script:ActiveRing) {
 }
 
 Write-Log "Selected ring: $($script:ActiveRing.Name)" -Level INFO
+
+# Quick startup rescan
+Write-Host ""
+Write-Host "Scanning ring peers..." -ForegroundColor Gray
+$startupPeers = Get-TailscalePeersByTag -Tag $script:ActiveRing.Tag
+$startupOnline = ($startupPeers | Where-Object { $_.Online }).Count
+Write-Host "  $($startupPeers.Count) peers found, $startupOnline online" -ForegroundColor $(if ($startupOnline -eq $startupPeers.Count) { "Green" } else { "Yellow" })
+
+# Update ring data
+[array]$rings = @(Get-SavedRings)
+for ($i = 0; $i -lt $rings.Count; $i++) {
+    if ($rings[$i].Tag -eq $script:ActiveRing.Tag) {
+        $rings[$i].PeerCount = $startupPeers.Count
+        $rings[$i].LastScan = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $script:ActiveRing = $rings[$i]
+        Save-Rings -Rings $rings
+        break
+    }
+}
+
+Write-Host ""
+Write-Host "Press any key to continue..." -ForegroundColor Gray
+$null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
 
 # Start main loop
 Start-MainLoop
