@@ -13,28 +13,29 @@
     
 .NOTES
     Share naming convention: RR_Backups
-    Config stored in: C:\VLABS_ResilienceRing\ring-config.json
-    Peer list stored in: C:\VLABS_ResilienceRing\storage-peers.json
+    Config stored in: C:\ProgramData\VLABS_ResilienceRing\ring-config.json
+    Peer list stored in: C:\ProgramData\VLABS_ResilienceRing\storage-peers.json
 #>
 
-# Constants - HARDCODED to avoid scope issues when dot-sourced
-$global:RR_DataPath = "C:\VLABS_ResilienceRing"
-$global:RR_ConfigFile = "C:\VLABS_ResilienceRing\ring-config.json"
-$global:RR_PeersFile = "C:\VLABS_ResilienceRing\storage-peers.json"
+# Constants - DATA goes to ProgramData (separate from git repo install directory)
+# This prevents git reset --hard from deleting config files during updates
+$global:RR_DataPath = "C:\ProgramData\VLABS_ResilienceRing"
+$global:RR_ConfigFile = "C:\ProgramData\VLABS_ResilienceRing\ring-config.json"
+$global:RR_PeersFile = "C:\ProgramData\VLABS_ResilienceRing\storage-peers.json"
 $global:RR_ShareName = "RR_Backups"
 $global:RR_ServiceUser = "RR_Service"
 
 # Helper functions to get paths (more reliable than variables)
-function Get-RRDataPath { return "C:\VLABS_ResilienceRing" }
-function Get-RRConfigFile { return "C:\VLABS_ResilienceRing\ring-config.json" }
-function Get-RRPeersFile { return "C:\VLABS_ResilienceRing\storage-peers.json" }
+function Get-RRDataPath { return "C:\ProgramData\VLABS_ResilienceRing" }
+function Get-RRConfigFile { return "C:\ProgramData\VLABS_ResilienceRing\ring-config.json" }
+function Get-RRPeersFile { return "C:\ProgramData\VLABS_ResilienceRing\storage-peers.json" }
 function Get-RRShareName { return "RR_Backups" }
 function Get-RRServiceUser { return "RR_Service" }
 
 # Debug log function
 function Write-RRDebug {
     param([string]$Message)
-    $logFile = "C:\VLABS_ResilienceRing\debug.log"
+    $logFile = "C:\ProgramData\VLABS_ResilienceRing\debug.log"
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     "$timestamp | $Message" | Add-Content -Path $logFile -ErrorAction SilentlyContinue
 }
@@ -88,15 +89,23 @@ function Test-RingHealth {
 function Invoke-RingMigration {
     <#
     .SYNOPSIS
-        Migrates data from old locations to canonical path
+        Migrates data from old locations to canonical path (ProgramData)
         Only copies if destination doesn't already exist
     #>
-    # HARDCODED paths
-    $configFile = "C:\VLABS_ResilienceRing\ring-config.json"
-    $peersFile = "C:\VLABS_ResilienceRing\storage-peers.json"
+    # HARDCODED paths - ProgramData survives git updates
+    $dataPath = "C:\ProgramData\VLABS_ResilienceRing"
+    $configFile = "C:\ProgramData\VLABS_ResilienceRing\ring-config.json"
+    $peersFile = "C:\ProgramData\VLABS_ResilienceRing\storage-peers.json"
     
+    # Ensure data directory exists
+    if (-not (Test-Path $dataPath)) {
+        New-Item -Path $dataPath -ItemType Directory -Force | Out-Null
+    }
+    
+    # Legacy paths include both old config location AND old install directory
     $legacyPaths = @(
-        "C:\VLABS_SecureBackups"
+        "C:\VLABS_SecureBackups",
+        "C:\VLABS_ResilienceRing"  # Old install dir that might have config files
     )
     
     Write-RRDebug "Invoke-RingMigration called"
@@ -266,7 +275,7 @@ function Get-RingConfig {
         Gets the local ring configuration
     #>
     # HARDCODED path to avoid any variable issues
-    $configFile = "C:\VLABS_ResilienceRing\ring-config.json"
+    $configFile = "C:\ProgramData\VLABS_ResilienceRing\ring-config.json"
     
     Write-RRDebug "Get-RingConfig called"
     Write-RRDebug "  Looking for: $configFile"
@@ -306,9 +315,9 @@ function Save-RingConfig {
     #>
     param([hashtable]$Config)
     
-    # HARDCODED path to avoid any variable issues
-    $configFile = "C:\VLABS_ResilienceRing\ring-config.json"
-    $dataPath = "C:\VLABS_ResilienceRing"
+    # HARDCODED path - uses ProgramData to survive git updates
+    $configFile = "C:\ProgramData\VLABS_ResilienceRing\ring-config.json"
+    $dataPath = "C:\ProgramData\VLABS_ResilienceRing"
     
     Write-RRDebug "Save-RingConfig called"
     Write-RRDebug "  Target file: $configFile"

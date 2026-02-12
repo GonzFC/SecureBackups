@@ -27,15 +27,16 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.6.3'
+$script:AppVersion = '1.7.0'
 $script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
 $script:RepoBranch = 'main'
 
-# Paths - Canonical data path for all configuration
+# Paths - Data in ProgramData (separate from git install directory)
+# This prevents git reset --hard from deleting config files during updates
 $script:InstallPath = $PSScriptRoot
-$script:DataPath = "C:\VLABS_ResilienceRing"
+$script:DataPath = "C:\ProgramData\VLABS_ResilienceRing"
 $script:ConfigPath = $script:DataPath  # For compatibility with VLABS-SecureBackup.ps1
 $script:DestinationsFile = Join-Path $DataPath "destinations.json"
 $script:JobsFile = Join-Path $DataPath "jobs.json"

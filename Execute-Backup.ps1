@@ -14,7 +14,8 @@ param(
 )
 
 # Configuration
-$script:ConfigPath = "C:\VLABS_ResilienceRing"
+# Data in ProgramData (separate from git install directory)
+$script:ConfigPath = "C:\ProgramData\VLABS_ResilienceRing"
 $script:JobsFile = Join-Path $ConfigPath "jobs.json"
 $script:LogPath = Join-Path $ConfigPath "Logs"
 

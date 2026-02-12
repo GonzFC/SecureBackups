@@ -11,9 +11,10 @@
     Requires: Administrator privileges
 #>
 
-# Configuration - Canonical path for all data
-$script:ConfigPath = "C:\VLABS_ResilienceRing"
-$script:LegacyConfigPath = "C:\VLABS_SecureBackups"
+# Configuration - Data goes to ProgramData (separate from git install directory)
+# This prevents git reset --hard from deleting config files during updates
+$script:ConfigPath = "C:\ProgramData\VLABS_ResilienceRing"
+$script:LegacyConfigPaths = @("C:\VLABS_SecureBackups", "C:\VLABS_ResilienceRing")
 $script:DestinationsFile = Join-Path $ConfigPath "destinations.json"
 $script:JobsFile = Join-Path $ConfigPath "jobs.json"
 $script:LogPath = Join-Path $ConfigPath "Logs"
@@ -49,24 +50,26 @@ function Initialize-Environment {
             Write-Log "Created logs directory: $LogPath"
         }
 
-        # Migrate from legacy path (C:\VLABS_SecureBackups) if needed
-        if (Test-Path $LegacyConfigPath) {
-            $filesToMigrate = @('destinations.json', 'jobs.json')
+        # Migrate from legacy paths (old install locations) if needed
+        foreach ($LegacyPath in $LegacyConfigPaths) {
+            if (-not (Test-Path $LegacyPath)) { continue }
+            
+            $filesToMigrate = @('destinations.json', 'jobs.json', 'ring-config.json', 'storage-peers.json')
             $migrated = $false
             
             foreach ($file in $filesToMigrate) {
-                $legacyFile = Join-Path $LegacyConfigPath $file
+                $legacyFile = Join-Path $LegacyPath $file
                 $newFile = Join-Path $ConfigPath $file
                 
                 if ((Test-Path $legacyFile) -and -not (Test-Path $newFile)) {
                     Copy-Item -Path $legacyFile -Destination $newFile -Force
-                    Write-Log "Migrated $file from legacy path" -Level INFO
+                    Write-Log "Migrated $file from $LegacyPath" -Level INFO
                     $migrated = $true
                 }
             }
             
             # Migrate logs folder
-            $legacyLogs = Join-Path $LegacyConfigPath "Logs"
+            $legacyLogs = Join-Path $LegacyPath "Logs"
             if ((Test-Path $legacyLogs) -and (Get-ChildItem $legacyLogs -ErrorAction SilentlyContinue)) {
                 Get-ChildItem $legacyLogs -File | ForEach-Object {
                     $destFile = Join-Path $LogPath $_.Name
@@ -74,12 +77,12 @@ function Initialize-Environment {
                         Copy-Item -Path $_.FullName -Destination $destFile -Force
                     }
                 }
-                Write-Log "Migrated log files from legacy path" -Level INFO
+                Write-Log "Migrated log files from $LegacyPath" -Level INFO
                 $migrated = $true
             }
             
             if ($migrated) {
-                Write-Host "[OK] Migrated data from legacy path" -ForegroundColor Green
+                Write-Host "[OK] Migrated data from $LegacyPath" -ForegroundColor Green
             }
         }
 
