@@ -230,24 +230,30 @@ function Update-PeerList {
     <#
     .SYNOPSIS
         Scans for all Tailscale peers and updates the local peer list
+    .PARAMETER Verbose
+        If true, shows detailed progress (for admin use only)
     #>
-    Write-Host "`nScanning for Tailscale peers..." -ForegroundColor Cyan
+    param(
+        [switch]$ShowDetails
+    )
+    
+    Write-Host "`nScanning network..." -ForegroundColor Cyan -NoNewline
     
     $allPeers = Get-TailscalePeers
     $onlinePeers = $allPeers | Where-Object { $_.Online -eq $true }
     
-    Write-Host "Found $($allPeers.Count) total peers, $($onlinePeers.Count) online" -ForegroundColor Gray
-    
     $peerList = @()
-    $index = 1
+    $reachableCount = 0
+    $totalCount = $onlinePeers.Count
     
     foreach ($peer in $onlinePeers) {
-        Write-Host "  [$index/$($onlinePeers.Count)] Testing $($peer.HostName)..." -ForegroundColor Gray -NoNewline
+        # Show progress dots (not hostnames)
+        Write-Host "." -NoNewline -ForegroundColor Gray
         
         $pingResult = Test-PeerConnectivity -TailscaleIP $peer.TailscaleIP
         
         if ($pingResult.Success) {
-            Write-Host " ${pingResult.PingMs}ms" -ForegroundColor Green
+            $reachableCount++
             
             $peerList += [PSCustomObject]@{
                 NodeKey = $peer.NodeKey
@@ -256,21 +262,18 @@ function Update-PeerList {
                 OS = $peer.OS
                 PingMs = $pingResult.PingMs
                 LastSeen = (Get-Date).ToString('o')
-                IsStoragePeer = $false  # Will be set when configured as storage
+                IsStoragePeer = $false
                 StorageConfig = $null
             }
         }
-        else {
-            Write-Host " UNREACHABLE" -ForegroundColor Yellow
-        }
-        
-        $index++
     }
+    
+    Write-Host "" # New line after dots
     
     # Save to file
     $peerList | ConvertTo-Json -Depth 5 | Set-Content $script:PeersFile -Force
     
-    Write-Host "`n[OK] Peer list updated: $($peerList.Count) reachable peers" -ForegroundColor Green
+    Write-Host "[OK] Found $reachableCount available storage nodes" -ForegroundColor Green
     
     return $peerList
 }
@@ -532,30 +535,34 @@ function Show-StoragePeers {
     #>
     Clear-Host
     Write-Host "`n========================================" -ForegroundColor Cyan
-    Write-Host "    AVAILABLE STORAGE PEERS" -ForegroundColor Cyan
+    Write-Host "    AVAILABLE STORAGE NODES" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
     
-    Write-Host "Scanning peers..." -ForegroundColor Gray
+    Write-Host "Scanning..." -ForegroundColor Gray
     $peers = Get-StoragePeers
     
     if ($peers.Count -eq 0) {
-        Write-Host "No storage peers available." -ForegroundColor Yellow
-        Write-Host "Run 'Add Storage Peer' on other machines to add them to the ring." -ForegroundColor Gray
+        Write-Host "No storage nodes available." -ForegroundColor Yellow
+        Write-Host "Configure other machines as storage nodes to add them to the ring." -ForegroundColor Gray
     }
     else {
-        Write-Host "`n  #  | Score | Ping   | Host                 | Free  | Jobs" -ForegroundColor Gray
-        Write-Host "  ---|-------|--------|----------------------|-------|-----" -ForegroundColor Gray
+        Write-Host "`n  #  | Score | Ping   | Node ID    | Free  | Jobs" -ForegroundColor Gray
+        Write-Host "  ---|-------|--------|------------|-------|-----" -ForegroundColor Gray
         
         $index = 1
         foreach ($peer in $peers) {
             $pingColor = if ($peer.PingMs -lt 50) { 'Green' } elseif ($peer.PingMs -lt 100) { 'Yellow' } else { 'Red' }
             $scoreColor = if ($peer.Score -ge 70) { 'Green' } elseif ($peer.Score -ge 50) { 'Yellow' } else { 'Red' }
             
+            # Generate anonymous node ID from IP last octet
+            $lastOctet = ($peer.TailscaleIP -split '\.')[-1]
+            $nodeId = "Node-$lastOctet"
+            
             Write-Host ("  {0,-2} |" -f $index) -NoNewline
             Write-Host (" {0,5} " -f $peer.Score) -ForegroundColor $scoreColor -NoNewline
             Write-Host "|" -NoNewline
             Write-Host (" {0,5}ms " -f $peer.PingMs) -ForegroundColor $pingColor -NoNewline
-            Write-Host ("| {0,-20} | {1,4}% | {2,3}" -f $peer.HostName.Substring(0, [Math]::Min(20, $peer.HostName.Length)), $peer.FreePct, $peer.JobsHosted)
+            Write-Host ("| {0,-10} | {1,4}% | {2,3}" -f $nodeId, $peer.FreePct, $peer.JobsHosted)
             
             $index++
         }
@@ -567,18 +574,4 @@ function Show-StoragePeers {
 
 #endregion
 
-#region Exports
-
-# Export functions for use in ResilienceRing.ps1
-Export-ModuleMember -Function @(
-    'Test-TailscaleInstalled',
-    'Install-Tailscale',
-    'Get-TailscalePeers',
-    'Update-PeerList',
-    'Add-StoragePeer',
-    'Get-StoragePeers',
-    'Get-PeerScore',
-    'Show-StoragePeers'
-) -ErrorAction SilentlyContinue
-
-#endregion
+# Functions are available when dot-sourced
