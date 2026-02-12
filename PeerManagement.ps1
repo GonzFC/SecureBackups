@@ -19,18 +19,36 @@ $script:ConfigFile = Join-Path $PSScriptRoot "ring-config.json"
 
 #region Tailscale Functions
 
+function Get-TailscaleExePath {
+    <#
+    .SYNOPSIS
+        Finds the tailscale.exe path (MSI doesn't add to PATH)
+    #>
+    $candidates = @(
+        'C:\Program Files\Tailscale\tailscale.exe',
+        'C:\Program Files (x86)\Tailscale\tailscale.exe',
+        'C:\Program Files\Tailscale IPN\tailscale.exe'
+    )
+    
+    # Also check PATH
+    $inPath = Get-Command tailscale -ErrorAction SilentlyContinue
+    if ($inPath) { return $inPath.Source }
+    
+    return $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+
 function Test-TailscaleInstalled {
     <#
     .SYNOPSIS
         Checks if Tailscale is installed and running
     #>
-    $tailscale = Get-Command tailscale -ErrorAction SilentlyContinue
-    if (-not $tailscale) {
+    $tailscaleExe = Get-TailscaleExePath
+    if (-not $tailscaleExe) {
         return @{ Installed = $false; Running = $false; Connected = $false }
     }
     
     try {
-        $status = & tailscale status --json 2>$null | ConvertFrom-Json
+        $status = & $tailscaleExe status --json 2>$null | ConvertFrom-Json
         $isConnected = $null -ne $status.Self.TailscaleIPs
         return @{ 
             Installed = $true
@@ -102,14 +120,26 @@ function Install-Tailscale {
         }
         
         # Wait for service
-        Start-Sleep -Seconds 3
+        Start-Sleep -Seconds 5
+        
+        # Find tailscale.exe (MSI doesn't add to PATH immediately)
+        $tailscaleExe = @(
+            'C:\Program Files\Tailscale\tailscale.exe',
+            'C:\Program Files (x86)\Tailscale\tailscale.exe'
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        
+        if (-not $tailscaleExe) {
+            throw "Tailscale installed but tailscale.exe not found"
+        }
+        
+        Write-Host "Found: $tailscaleExe" -ForegroundColor Gray
         
         # Start Tailscale with auth key
         Write-Host "Authenticating with Tailscale..." -ForegroundColor Gray
-        & tailscale up --authkey=$AuthKey --unattended --accept-dns=false
+        & $tailscaleExe up --authkey=$AuthKey --unattended --accept-dns=false
         
         if ($LASTEXITCODE -ne 0) {
-            throw "Tailscale authentication failed"
+            throw "Tailscale authentication failed (exit code: $LASTEXITCODE)"
         }
         
         # Verify connection
@@ -142,7 +172,10 @@ function Get-TailscalePeers {
         Gets all visible Tailscale peers with their status
     #>
     try {
-        $statusJson = & tailscale status --json 2>$null
+        $tailscaleExe = Get-TailscaleExePath
+        if (-not $tailscaleExe) { return @() }
+        
+        $statusJson = & $tailscaleExe status --json 2>$null
         if (-not $statusJson) { return @() }
         
         $status = $statusJson | ConvertFrom-Json
