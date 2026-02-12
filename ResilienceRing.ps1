@@ -27,7 +27,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.8.4'
+$script:AppVersion = '1.8.5'
 $script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -586,6 +586,17 @@ elseif ($ForceUpdate) {
 Write-Host ""
 if (Get-Command 'Invoke-StartupDiscovery' -ErrorAction SilentlyContinue) {
     Invoke-StartupDiscovery
+}
+
+# Publish node status for RRM
+if (Get-Command 'Publish-NodeStatus' -ErrorAction SilentlyContinue) {
+    Write-Host "Publishing node status..." -ForegroundColor Gray -NoNewline
+    if (Publish-NodeStatus) {
+        Write-Host " [OK]" -ForegroundColor Green
+    }
+    else {
+        Write-Host " [SKIP - not a storage peer]" -ForegroundColor Yellow
+    }
 }
 
 Write-Host ""

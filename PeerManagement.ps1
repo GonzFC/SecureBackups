@@ -1598,4 +1598,88 @@ function Invoke-StartupDiscovery {
 
 #endregion
 
+#region Node Status Publishing
+
+function Publish-NodeStatus {
+    <#
+    .SYNOPSIS
+        Publishes this node's job status to the local RR_Backups share for RRM to read
+    .DESCRIPTION
+        Creates/updates _nodeinfo/jobs-status.json on the local storage path.
+        Called on TUI startup and after each backup run.
+    #>
+    try {
+        $config = Get-RingConfig
+        if (-not $config -or -not $config.CustomerCode) { return $false }
+        
+        # Get local storage path
+        $storagePath = $config.StoragePath
+        if (-not $storagePath -or -not (Test-Path $storagePath)) { return $false }
+        
+        # Create _nodeinfo folder
+        $nodeInfoPath = Join-Path $storagePath "_nodeinfo"
+        if (-not (Test-Path $nodeInfoPath)) {
+            New-Item -Path $nodeInfoPath -ItemType Directory -Force | Out-Null
+        }
+        
+        # Get all jobs
+        $jobsFile = Join-Path (Get-RRDataPath) "jobs.json"
+        $jobs = @()
+        if (Test-Path $jobsFile) {
+            try {
+                $jobsContent = Get-Content $jobsFile -Raw | ConvertFrom-Json
+                if ($jobsContent) { $jobs = @($jobsContent) }
+            }
+            catch { }
+        }
+        
+        # Get Tailscale hostname
+        $tsHostname = ""
+        try {
+            $tsStatus = tailscale status --json 2>$null | ConvertFrom-Json
+            $tsHostname = $tsStatus.Self.DNSName -replace '\..*$', ''
+        }
+        catch { $tsHostname = $env:COMPUTERNAME }
+        
+        # Build status object
+        $nodeStatus = @{
+            NodeHostname = $tsHostname
+            CustomerCode = $config.CustomerCode
+            Location = $config.Location
+            LastUpdated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            Jobs = @()
+        }
+        
+        foreach ($job in $jobs) {
+            $nodeStatus.Jobs += @{
+                JobName = $job.JobName
+                AppName = $job.AppName
+                BackupType = $job.BackupType
+                BackupObject = $job.BackupObject
+                SourceLocation = $job.SourceLocation
+                Enabled = $job.Enabled
+                LastRun = $job.LastRun
+                LastStatus = $job.LastStatus
+                LastDurationSeconds = $job.LastDurationSeconds
+                LastSizeBytes = $job.LastSizeBytes
+                Frequency = $job.Frequency
+                RetentionMonthly = $job.RetentionMonthly
+                RetentionWeekly = $job.RetentionWeekly
+                RetentionRecent = $job.RetentionRecent
+            }
+        }
+        
+        # Save to share
+        $statusFile = Join-Path $nodeInfoPath "jobs-status.json"
+        $nodeStatus | ConvertTo-Json -Depth 10 | Set-Content $statusFile -Force
+        
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+#endregion
+
 # Functions are available when dot-sourced
