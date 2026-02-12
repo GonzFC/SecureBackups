@@ -511,97 +511,201 @@ function New-BackupDestination {
     Write-Host "     CREATE BACKUP DESTINATION" -ForegroundColor Cyan
     Write-Host "===============================================`n" -ForegroundColor Cyan
 
-    # Get short name
-    $shortName = Read-Host "Enter a short name for this destination"
-    if ([string]::IsNullOrWhiteSpace($shortName)) {
-        Write-Host "`nError: Short name cannot be empty!" -ForegroundColor Red
+    # Check if ring is configured
+    $ringConfig = Get-RingConfig
+    if (-not $ringConfig -or -not $ringConfig.CustomerCode) {
+        Write-Host "ERROR: This machine is not configured as a storage peer." -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Please run 'Add Storage Peer' (P) first to configure this machine." -ForegroundColor Yellow
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+    
+    $localLocation = Get-LocalLocation
+    $customerCode = $ringConfig.CustomerCode
+    
+    Write-Host "Customer: $customerCode" -ForegroundColor Cyan
+    Write-Host "Location: $localLocation" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Step 1: Application Name
+    Write-Host "--- Step 1: Application Name ---" -ForegroundColor Yellow
+    Write-Host "Enter a name for the application being backed up."
+    Write-Host "Examples: Community, Salto, SAP, QuickBooks"
+    Write-Host ""
+    $appName = Read-Host "Application Name"
+    if ([string]::IsNullOrWhiteSpace($appName)) {
+        Write-Host "`nError: Application name cannot be empty!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
 
-    # Check if name already exists
-    $destinations = @(Get-Destinations)
-    if ($destinations | Where-Object { $_.ShortName -eq $shortName }) {
-        Write-Host "`nError: A destination with this name already exists!" -ForegroundColor Red
+    # Step 2: Backup Type
+    Write-Host "`n--- Step 2: Select Backup Type ---" -ForegroundColor Yellow
+    Write-Host "F   = File (single file)"
+    Write-Host "D   = Directory (entire folder)"
+    Write-Host "SQL = SQL Server Database (backup folder)"
+    $backupType = Read-Host "`nEnter type (F/D/SQL)"
+
+    $backupType = $backupType.ToUpper()
+    if ($backupType -notin @("F", "D", "SQL")) {
+        Write-Host "`nInvalid backup type!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
 
-    # Get SMB path
-    Write-Host "`nEnter the full SMB path including all subfolders"
-    $smbPath = Read-Host "Path (e.g., \\server\share\subfolder1\subfolder2)"
-    if ([string]::IsNullOrWhiteSpace($smbPath)) {
-        Write-Host "`nError: SMB path cannot be empty!" -ForegroundColor Red
+    # Step 3: Backup Object
+    Write-Host "`n--- Step 3: Enter Backup Object ---" -ForegroundColor Yellow
+    $backupObject = ""
+    switch ($backupType) {
+        "F" {
+            $backupObject = Read-Host "Enter full path and filename (e.g., C:\Data\important.db)"
+            if (-not (Test-Path $backupObject -PathType Leaf)) {
+                Write-Host "`nWarning: File does not exist!" -ForegroundColor Yellow
+                $confirm = Read-Host "Continue anyway? (yes/no)"
+                if ($confirm -ne "yes") { return }
+            }
+        }
+        "D" {
+            $backupObject = Read-Host "Enter full directory path (e.g., C:\Data\Documents)"
+            if (-not (Test-Path $backupObject -PathType Container)) {
+                Write-Host "`nWarning: Directory does not exist!" -ForegroundColor Yellow
+                $confirm = Read-Host "Continue anyway? (yes/no)"
+                if ($confirm -ne "yes") { return }
+            }
+        }
+        "SQL" {
+            $backupObject = Read-Host "Enter SQL backup folder path (e.g., C:\SQLBackups)"
+            if (-not (Test-Path $backupObject -PathType Container)) {
+                Write-Host "`nWarning: Directory does not exist!" -ForegroundColor Yellow
+                $confirm = Read-Host "Continue anyway? (yes/no)"
+                if ($confirm -ne "yes") { return }
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($backupObject)) {
+        Write-Host "`nError: Backup object cannot be empty!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
 
-    # Validate path format
-    $pathInfo = Split-UncPath -UncPath $smbPath
-    if (-not $pathInfo) {
+    # Step 4: Select Storage Peer
+    Write-Host "`n--- Step 4: Select Storage Peer ---" -ForegroundColor Yellow
+    Write-Host "Checking available storage peers..." -ForegroundColor Gray
+    
+    $availablePeers = Get-AvailableStoragePeers
+    
+    if ($availablePeers.Count -eq 0) {
+        Write-Host "`nNo storage peers available!" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Possible reasons:" -ForegroundColor Gray
+        Write-Host "  - Other machines haven't run 'Add Storage Peer' (P)" -ForegroundColor Gray
+        Write-Host "  - Other machines are offline" -ForegroundColor Gray
+        Write-Host "  - Run 'Discover & Update' (D) to refresh the peer list" -ForegroundColor Gray
         Read-Host "`nPress Enter to continue"
         return
     }
-
-    # Get credentials
-    Write-Host "`n--- Authentication Credentials ---" -ForegroundColor Yellow
-    $domain = Read-Host "Enter domain (leave empty if not using domain)"
-
-    $username = Read-Host "Enter username"
-    if ([string]::IsNullOrWhiteSpace($username)) {
-        Write-Host "`nError: Username cannot be empty!" -ForegroundColor Red
+    
+    Write-Host ""
+    Write-Host "  #  | Ping   | Location             | Hostname" -ForegroundColor Gray
+    Write-Host " ----|--------|----------------------|--------------------" -ForegroundColor Gray
+    
+    for ($i = 0; $i -lt $availablePeers.Count; $i++) {
+        $peer = $availablePeers[$i]
+        $pingColor = if ($peer.PingMs -lt 50) { 'Green' } elseif ($peer.PingMs -lt 100) { 'Yellow' } else { 'Red' }
+        $locationStr = if ($peer.Location) { $peer.Location } else { "N/A" }
+        if ($locationStr.Length -gt 20) { $locationStr = $locationStr.Substring(0, 17) + "..." }
+        
+        Write-Host (" {0,2} |" -f ($i + 1)) -NoNewline
+        Write-Host (" {0,5}ms" -f $peer.PingMs) -ForegroundColor $pingColor -NoNewline
+        Write-Host (" | {0,-20} | {1}" -f $locationStr, $peer.Hostname)
+    }
+    
+    Write-Host ""
+    $peerSelection = Read-Host "Select storage peer number (or 0 to cancel)"
+    $peerIndex = [int]$peerSelection - 1
+    
+    if ($peerSelection -eq "0" -or $peerIndex -lt 0 -or $peerIndex -ge $availablePeers.Count) {
+        Write-Host "`nOperation cancelled." -ForegroundColor Yellow
         Read-Host "`nPress Enter to continue"
         return
     }
-
-    $password = Read-Host "Enter password" -AsSecureString
-    $plainPassword = Get-PlainTextPassword -SecurePassword $password
-    if ([string]::IsNullOrWhiteSpace($plainPassword)) {
-        Write-Host "`nError: Password cannot be empty!" -ForegroundColor Red
-        Read-Host "`nPress Enter to continue"
-        return
-    }
-
-    # Encrypt password
-    $encryptedPassword = ConvertTo-EncryptedPassword -PlainTextPassword $plainPassword
-    if (-not $encryptedPassword) {
-        Write-Host "`nError: Failed to encrypt password!" -ForegroundColor Red
-        Read-Host "`nPress Enter to continue"
-        return
-    }
-
-    # Create temporary destination object for testing
-    $testDestination = @{
-        ShortName = $shortName
-        Path = $smbPath
-        Domain = $domain
-        Username = $username
-        EncryptedPassword = $encryptedPassword
-    }
-
-    # Verify destination
+    
+    $selectedPeer = $availablePeers[$peerIndex]
+    
+    # Build destination path
+    # Format: \\IP\RR_Backups\CUSTOMER_CODE\Location\Application\type\
+    $destPath = Get-DestinationPath `
+        -TailscaleIP $selectedPeer.TailscaleIP `
+        -CustomerCode $customerCode `
+        -Location $localLocation `
+        -Application $appName `
+        -BackupType $backupType
+    
+    Write-Host "`nDestination path will be:" -ForegroundColor Cyan
+    Write-Host "  $destPath" -ForegroundColor White
+    
+    # Create destination path and verify
     Write-Host "`n--- Verifying Destination ---" -ForegroundColor Yellow
-    if (-not (Test-SmbDestination -Destination $testDestination)) {
+    
+    if (-not (Initialize-DestinationPath -TailscaleIP $selectedPeer.TailscaleIP -DestinationPath $destPath -CustomerCode $customerCode)) {
         Write-Host "`nDestination verification failed!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
-
-    # Add destination with all information
+    
+    # Generate short name from app name
+    $shortName = "$appName-$backupType-$($selectedPeer.Hostname)"
+    
+    # Get service account credentials for this destination
+    $servicePassword = Get-RingServicePassword -CustomerCode $customerCode
+    $encryptedPassword = ConvertTo-EncryptedPassword -PlainTextPassword $servicePassword
+    
+    # Check if destination name already exists
+    $destinations = @(Get-Destinations)
+    if ($destinations | Where-Object { $_.ShortName -eq $shortName }) {
+        $counter = 2
+        $baseShortName = $shortName
+        while ($destinations | Where-Object { $_.ShortName -eq $shortName }) {
+            $shortName = "$baseShortName-$counter"
+            $counter++
+        }
+    }
+    
+    # Create destination object
     $newDestination = @{
         ShortName = $shortName
-        Path = $smbPath
-        Domain = $domain
-        Username = $username
+        Application = $appName
+        BackupType = $backupType
+        BackupObject = $backupObject
+        Path = $destPath
+        StoragePeerIP = $selectedPeer.TailscaleIP
+        StoragePeerHostname = $selectedPeer.Hostname
+        StoragePeerLocation = $selectedPeer.Location
+        CustomerCode = $customerCode
+        SourceLocation = $localLocation
+        Domain = ""
+        Username = "RR_Service"
         EncryptedPassword = $encryptedPassword
         CreatedDate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     }
-
+    
     $destinations += $newDestination
-
+    
     if (Save-Destinations -Destinations $destinations) {
-        Write-Host "`nDestination '$shortName' created successfully!" -ForegroundColor Green
-        Write-Log "Created destination: $shortName -> $smbPath (User: $($domain)\$username)" -Level SUCCESS
+        Write-Host "`n===============================================" -ForegroundColor Green
+        Write-Host "     DESTINATION CREATED SUCCESSFULLY!" -ForegroundColor Green
+        Write-Host "===============================================" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "  Name:        $shortName" -ForegroundColor White
+        Write-Host "  Application: $appName" -ForegroundColor White
+        Write-Host "  Type:        $backupType" -ForegroundColor White
+        Write-Host "  Source:      $backupObject" -ForegroundColor White
+        Write-Host "  Destination: $destPath" -ForegroundColor White
+        Write-Host "  Peer:        $($selectedPeer.Hostname) ($($selectedPeer.Location))" -ForegroundColor White
+        Write-Host ""
+        Write-Log "Created destination: $shortName -> $destPath" -Level SUCCESS
     }
     else {
         Write-Host "`nFailed to save destination!" -ForegroundColor Red

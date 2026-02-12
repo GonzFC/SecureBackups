@@ -186,6 +186,16 @@ function Get-LocalTailscaleTag {
     return $null
 }
 
+function Get-LocalLocation {
+    <#
+    .SYNOPSIS
+        Gets the Location name from local configuration
+    #>
+    $config = Get-RingConfig
+    if ($config) { return $config.Location }
+    return $null
+}
+
 #endregion
 
 #region Storage Peers List Management
@@ -648,9 +658,26 @@ function Add-StoragePeer {
     
     Write-Host ""
     
-    # Step 4: Storage Path
-    Write-Host "STEP 4: Storage Location" -ForegroundColor Yellow
-    Write-Host "-------------------------" -ForegroundColor Yellow
+    # Step 4: Location Name
+    Write-Host "STEP 4: Location Name" -ForegroundColor Yellow
+    Write-Host "----------------------" -ForegroundColor Yellow
+    Write-Host "Enter a friendly name for this computer's location."
+    Write-Host "This is used to organize backups from different sites."
+    Write-Host "Examples: San Antonio Villas, Main Office, Warehouse"
+    Write-Host "`nLocation Name: " -NoNewline -ForegroundColor White
+    $locationName = Read-Host
+    
+    if ([string]::IsNullOrWhiteSpace($locationName)) {
+        Write-Host "[ERROR] Location name is required" -ForegroundColor Red
+        Read-Host "`nPress Enter to return"
+        return
+    }
+    
+    Write-Host ""
+    
+    # Step 5: Storage Path
+    Write-Host "STEP 5: Storage Path" -ForegroundColor Yellow
+    Write-Host "---------------------" -ForegroundColor Yellow
     
     # Show available drives with free space
     Write-Host "Available drives:" -ForegroundColor Gray
@@ -687,8 +714,8 @@ function Add-StoragePeer {
     
     Write-Host ""
     
-    # Step 5: Quota
-    Write-Host "STEP 5: Storage Quota" -ForegroundColor Yellow
+    # Step 6: Quota
+    Write-Host "STEP 6: Storage Quota" -ForegroundColor Yellow
     Write-Host "----------------------" -ForegroundColor Yellow
     
     $driveLetter = (Split-Path $storagePath -Qualifier).TrimEnd(':')
@@ -709,8 +736,8 @@ function Add-StoragePeer {
     
     Write-Host ""
     
-    # Step 6: Create Service Account
-    Write-Host "STEP 6: Creating Service Account" -ForegroundColor Yellow
+    # Step 7: Create Service Account
+    Write-Host "STEP 7: Creating Service Account" -ForegroundColor Yellow
     Write-Host "---------------------------------" -ForegroundColor Yellow
     
     if (-not (New-RingServiceAccount -CustomerCode $codename)) {
@@ -721,8 +748,8 @@ function Add-StoragePeer {
     
     Write-Host ""
     
-    # Step 7: Create SMB Share with proper permissions
-    Write-Host "STEP 7: Creating SMB Share" -ForegroundColor Yellow
+    # Step 8: Create SMB Share with proper permissions
+    Write-Host "STEP 8: Creating SMB Share" -ForegroundColor Yellow
     Write-Host "---------------------------" -ForegroundColor Yellow
     
     $existingShare = Get-SmbShare -Name $script:ShareName -ErrorAction SilentlyContinue
@@ -794,8 +821,8 @@ function Add-StoragePeer {
     
     Write-Host ""
     
-    # Step 8: Save Configuration
-    Write-Host "STEP 8: Saving Configuration" -ForegroundColor Yellow
+    # Step 9: Save Configuration
+    Write-Host "STEP 9: Saving Configuration" -ForegroundColor Yellow
     Write-Host "-----------------------------" -ForegroundColor Yellow
     
     # Get Tailscale hostname (the one Tailscale uses, not Windows hostname)
@@ -809,6 +836,7 @@ function Add-StoragePeer {
         TailscaleIP = $tsStatus.Self.TailscaleIPs[0]
         CustomerCode = $codename
         TailscaleTag = $tailscaleTag
+        Location = $locationName
         StoragePath = $storagePath
         QuotaGB = $quotaGB
         CreatedAt = (Get-Date).ToString('o')
@@ -823,12 +851,13 @@ function Add-StoragePeer {
     $peerInfo = @{
         CustomerCode = $codename
         TailscaleTag = $tailscaleTag
+        Location = $locationName
         Hostname = $tailscaleHostname
         WindowsHostname = $env:COMPUTERNAME
         TailscaleIP = $tsStatus.Self.TailscaleIPs[0]
         QuotaGB = $quotaGB
         Since = (Get-Date).ToString('o')
-        Version = "1.5"
+        Version = "1.6"
     }
     $peerInfo | ConvertTo-Json | Set-Content $peerInfoPath -Force
     Write-Host "[OK] Peer info file created" -ForegroundColor Green
@@ -838,6 +867,7 @@ function Add-StoragePeer {
         Hostname = $tailscaleHostname
         TailscaleIP = $tsStatus.Self.TailscaleIPs[0]
         CustomerCode = $codename
+        Location = $locationName
         AddedAt = (Get-Date).ToString('o')
         QuotaGB = $quotaGB
     }
@@ -855,6 +885,7 @@ function Add-StoragePeer {
     Write-Host "  Tailscale IP:   $($config.TailscaleIP)" -ForegroundColor White
     Write-Host "  Customer:       $($config.CustomerCode)" -ForegroundColor White
     Write-Host "  Tailscale Tag:  $($config.TailscaleTag)" -ForegroundColor White
+    Write-Host "  Location:       $locationName" -ForegroundColor White
     Write-Host "  Storage:        $($config.StoragePath)" -ForegroundColor White
     Write-Host "  Share:          \\$tailscaleHostname\$script:ShareName" -ForegroundColor White
     Write-Host "  Quota:          $($config.QuotaGB) GB" -ForegroundColor White
@@ -969,17 +1000,18 @@ function Show-StoragePeers {
     if ($availablePeers.Count -gt 0) {
         Write-Host ""
         Write-Host " AVAILABLE ($($availablePeers.Count)):" -ForegroundColor Green
-        Write-Host "  #  | Ping   | Hostname           | Tailscale IP    | Quota" -ForegroundColor Gray
-        Write-Host " ----|--------|--------------------|-----------------|---------" -ForegroundColor Gray
+        Write-Host "  #  | Ping   | Location             | Hostname           | Tailscale IP" -ForegroundColor Gray
+        Write-Host " ----|--------|----------------------|--------------------|-----------------" -ForegroundColor Gray
         
         $index = 1
         foreach ($peer in ($availablePeers | Sort-Object PingMs)) {
             $pingColor = if ($peer.PingMs -lt 50) { 'Green' } elseif ($peer.PingMs -lt 100) { 'Yellow' } else { 'Red' }
-            $quotaStr = if ($peer.QuotaGB) { "$($peer.QuotaGB) GB" } else { "N/A" }
+            $locationStr = if ($peer.Location) { $peer.Location } else { "N/A" }
+            if ($locationStr.Length -gt 20) { $locationStr = $locationStr.Substring(0, 17) + "..." }
             
             Write-Host (" {0,2} |" -f $index) -NoNewline
             Write-Host (" {0,5}ms" -f $peer.PingMs) -ForegroundColor $pingColor -NoNewline
-            Write-Host (" | {0,-18} | {1,-15} | {2}" -f $peer.Hostname, $peer.TailscaleIP, $quotaStr)
+            Write-Host (" | {0,-20} | {1,-18} | {2}" -f $locationStr, $peer.Hostname, $peer.TailscaleIP)
             
             $index++
         }
@@ -1118,6 +1150,7 @@ function Update-PeerList {
             Hostname = $peerHostname
             TailscaleIP = $peer.TailscaleIP
             CustomerCode = $peerInfo.CustomerCode
+            Location = $peerInfo.Location
             AddedAt = (Get-Date).ToString('o')
             QuotaGB = $peerInfo.QuotaGB
         }
@@ -1166,6 +1199,202 @@ function Update-PeerList {
     Write-Host "  Total peers in list: $($currentPeers.Count)" -ForegroundColor Cyan
     
     Write-Host ""
+}
+
+#endregion
+
+#region Destination Helper Functions
+
+function Get-AvailableStoragePeers {
+    <#
+    .SYNOPSIS
+        Returns a list of available storage peers for destination selection
+        Excludes self and tests connectivity
+    #>
+    $config = Get-RingConfig
+    if (-not $config -or -not $config.CustomerCode) {
+        return @()
+    }
+    
+    $peers = @(Get-StoragePeersList)
+    $availablePeers = @()
+    
+    foreach ($peer in $peers) {
+        # Skip self
+        if ($peer.TailscaleIP -eq $config.TailscaleIP) {
+            continue
+        }
+        
+        # Test ping
+        $pingResult = Test-PeerPing -TailscaleIP $peer.TailscaleIP
+        if (-not $pingResult.Success) {
+            continue
+        }
+        
+        # Test SMB connection
+        $connected = Connect-RingShare -TailscaleIP $peer.TailscaleIP -CustomerCode $config.CustomerCode
+        if (-not $connected) {
+            continue
+        }
+        
+        # Verify share exists
+        $sharePath = "\\$($peer.TailscaleIP)\$script:ShareName"
+        $shareExists = Test-Path $sharePath -ErrorAction SilentlyContinue
+        
+        Disconnect-RingShare -TailscaleIP $peer.TailscaleIP
+        
+        if ($shareExists) {
+            $availablePeers += [PSCustomObject]@{
+                Hostname = $peer.Hostname
+                TailscaleIP = $peer.TailscaleIP
+                Location = $peer.Location
+                CustomerCode = $peer.CustomerCode
+                QuotaGB = $peer.QuotaGB
+                PingMs = $pingResult.PingMs
+            }
+        }
+    }
+    
+    return $availablePeers | Sort-Object PingMs
+}
+
+function Get-DestinationPath {
+    <#
+    .SYNOPSIS
+        Builds the destination path for a backup job
+        Format: \\IP\RR_Backups\CUSTOMER_CODE\Location\Application\type\
+    #>
+    param(
+        [string]$TailscaleIP,
+        [string]$CustomerCode,
+        [string]$Location,
+        [string]$Application,
+        [string]$BackupType
+    )
+    
+    # Map backup type to folder name
+    $typeFolderMap = @{
+        "F" = "file"
+        "D" = "directory"
+        "SQL" = "database"
+    }
+    
+    $typeFolder = $typeFolderMap[$BackupType]
+    if (-not $typeFolder) { $typeFolder = $BackupType.ToLower() }
+    
+    # Build path: \\IP\RR_Backups\CODE\Location\Application\type\
+    $destPath = "\\$TailscaleIP\$script:ShareName\$($CustomerCode.ToUpper())\$Location\$Application\$typeFolder"
+    
+    return $destPath
+}
+
+function Initialize-DestinationPath {
+    <#
+    .SYNOPSIS
+        Creates the destination path if it doesn't exist
+    #>
+    param(
+        [string]$TailscaleIP,
+        [string]$DestinationPath,
+        [string]$CustomerCode
+    )
+    
+    # Connect to share
+    $connected = Connect-RingShare -TailscaleIP $TailscaleIP -CustomerCode $CustomerCode
+    if (-not $connected) {
+        Write-Host "[ERROR] Could not connect to storage peer" -ForegroundColor Red
+        return $false
+    }
+    
+    # Create path if needed
+    if (-not (Test-Path $DestinationPath)) {
+        try {
+            New-Item -Path $DestinationPath -ItemType Directory -Force | Out-Null
+            Write-Host "[OK] Created destination path: $DestinationPath" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "[ERROR] Could not create destination path: $_" -ForegroundColor Red
+            Disconnect-RingShare -TailscaleIP $TailscaleIP
+            return $false
+        }
+    }
+    else {
+        Write-Host "[OK] Destination path exists: $DestinationPath" -ForegroundColor Green
+    }
+    
+    # Test write permissions
+    $testFile = Join-Path $DestinationPath "test_write_$(Get-Date -Format 'yyyyMMddHHmmss').tmp"
+    try {
+        "test" | Out-File -FilePath $testFile -ErrorAction Stop
+        Remove-Item $testFile -Force -ErrorAction Stop
+        Write-Host "[OK] Write permissions verified" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "[ERROR] Path is not writable: $_" -ForegroundColor Red
+        Disconnect-RingShare -TailscaleIP $TailscaleIP
+        return $false
+    }
+    
+    Disconnect-RingShare -TailscaleIP $TailscaleIP
+    return $true
+}
+
+function Invoke-StartupDiscovery {
+    <#
+    .SYNOPSIS
+        Runs discovery at startup with a simple progress indicator
+    #>
+    $config = Get-RingConfig
+    if (-not $config -or -not $config.CustomerCode) {
+        Write-Host "[SKIP] Not configured as storage peer" -ForegroundColor Yellow
+        return
+    }
+    
+    Write-Host "Discovering storage peers" -NoNewline -ForegroundColor Gray
+    
+    # Get tagged peers from Tailscale
+    $taggedPeers = Get-TailscalePeersByTag -Tag $config.TailscaleTag
+    
+    if ($taggedPeers.Count -eq 0) {
+        Write-Host " [No peers found]" -ForegroundColor Yellow
+        return
+    }
+    
+    $discovered = 0
+    foreach ($peer in $taggedPeers) {
+        Write-Host "." -NoNewline -ForegroundColor Gray
+        
+        # Skip self
+        if ($peer.TailscaleIP -eq $config.TailscaleIP) { continue }
+        
+        # Quick ping test
+        $pingResult = Test-PeerPing -TailscaleIP $peer.TailscaleIP
+        if (-not $pingResult.Success) { continue }
+        
+        # Try to connect and get peer info
+        $connected = Connect-RingShare -TailscaleIP $peer.TailscaleIP -CustomerCode $config.CustomerCode
+        if (-not $connected) { continue }
+        
+        $peerInfo = Get-PeerInfo -TailscaleIP $peer.TailscaleIP
+        Disconnect-RingShare -TailscaleIP $peer.TailscaleIP
+        
+        if ($peerInfo -and $peerInfo.CustomerCode -eq $config.CustomerCode) {
+            $peerHostname = if ($peerInfo.Hostname) { $peerInfo.Hostname } else { $peer.HostName }
+            
+            Add-PeerToList -Peer ([PSCustomObject]@{
+                Hostname = $peerHostname
+                TailscaleIP = $peer.TailscaleIP
+                CustomerCode = $peerInfo.CustomerCode
+                Location = $peerInfo.Location
+                AddedAt = (Get-Date).ToString('o')
+                QuotaGB = $peerInfo.QuotaGB
+            })
+            $discovered++
+        }
+    }
+    
+    $totalPeers = (Get-StoragePeersList).Count
+    Write-Host " [$totalPeers peers]" -ForegroundColor Green
 }
 
 #endregion

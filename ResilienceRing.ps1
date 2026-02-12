@@ -27,7 +27,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.5.0'
+$script:AppVersion = '1.6.0'
 $script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -568,6 +568,12 @@ if (-not $SkipUpdateCheck) {
 }
 elseif ($ForceUpdate) {
     Invoke-SelfUpdate -Force
+}
+
+# Run startup discovery
+Write-Host ""
+if (Get-Command 'Invoke-StartupDiscovery' -ErrorAction SilentlyContinue) {
+    Invoke-StartupDiscovery
 }
 
 Write-Host ""
