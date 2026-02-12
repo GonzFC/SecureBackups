@@ -27,7 +27,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.2.1'
+$script:AppVersion = '1.3.0'
 $script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -449,6 +449,18 @@ else {
     exit 1
 }
 
+# Load Peer Management functions
+$peerScript = Join-Path $PSScriptRoot "PeerManagement.ps1"
+if (Test-Path $peerScript) {
+    try {
+        . $peerScript
+        Write-Host "[OK] Peer management loaded" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "[WARN] Peer management not loaded: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 #endregion
 
 #region Main Menu
@@ -479,6 +491,12 @@ function Show-MainMenu {
     Write-Host "   9. View Status & History" -ForegroundColor White
 
     Write-Host ""
+    Write-Host " STORAGE PEERS" -ForegroundColor Yellow
+    Write-Host "   P. Add Storage Peer (configure this machine)" -ForegroundColor White
+    Write-Host "   S. Show Available Storage Peers" -ForegroundColor White
+    Write-Host "   D. Discover & Update Peer List" -ForegroundColor White
+
+    Write-Host ""
     Write-Host " MAINTENANCE" -ForegroundColor Yellow
     Write-Host "   R. Re-authenticate All Destinations" -ForegroundColor White
     Write-Host "   T. Test Credential Decryption" -ForegroundColor White
@@ -506,6 +524,9 @@ function Start-MainLoop {
             "7" { Invoke-BackupJobNow }
             "8" { Show-AllBackupJobs }
             "9" { Show-BackupStatus }
+            "P" { Add-StoragePeer }
+            "S" { Show-StoragePeers }
+            "D" { Update-PeerList; Read-Host "`nPress Enter to continue" }
             "R" { Invoke-ReauthenticateAllDestinations }
             "T" { Test-DestinationCredentials }
             "U" { Invoke-SelfUpdate }
