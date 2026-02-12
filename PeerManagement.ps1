@@ -427,6 +427,34 @@ function Add-StoragePeer {
         New-Item -Path $customerPath -ItemType Directory -Force | Out-Null
     }
     
+    # Create a peer-info file in the storage path for discovery
+    $peerInfoPath = Join-Path $storagePath "peer-info.json"
+    $peerInfo = @{
+        CustomerCode = $codename
+        TailscaleIP = $tsStatus.Self.TailscaleIPs[0]
+        StoragePath = $storagePath
+        QuotaGB = $quotaGB
+        Version = "1.3"
+    }
+    $peerInfo | ConvertTo-Json | Set-Content $peerInfoPath -Force
+    
+    # Create SMB share for the storage path (if not exists)
+    $shareName = "Backups"
+    $existingShare = Get-SmbShare -Name $shareName -ErrorAction SilentlyContinue
+    if (-not $existingShare) {
+        try {
+            New-SmbShare -Name $shareName -Path $storagePath -FullAccess "Everyone" -Description "VLABS Resilience Ring Storage" | Out-Null
+            Write-Host "[OK] Created network share: \\$($env:COMPUTERNAME)\$shareName" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "[WARN] Could not create SMB share automatically: $_" -ForegroundColor Yellow
+            Write-Host "Please manually share '$storagePath' as '$shareName'" -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "[OK] Network share already exists: \\$($env:COMPUTERNAME)\$shareName" -ForegroundColor Green
+    }
+    
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Green
     Write-Host "    STORAGE PEER CONFIGURED!" -ForegroundColor Green
@@ -448,11 +476,55 @@ function Add-StoragePeer {
     Read-Host "`nPress Enter to continue"
 }
 
+function Get-LocalCustomerCode {
+    <#
+    .SYNOPSIS
+        Gets the CustomerCode from local configuration
+    #>
+    if (Test-Path $script:ConfigFile) {
+        $config = Get-Content $script:ConfigFile -Raw | ConvertFrom-Json
+        return $config.CustomerCode
+    }
+    return $null
+}
+
+function Get-PeerConfig {
+    <#
+    .SYNOPSIS
+        Attempts to read peer configuration from remote storage share
+    #>
+    param([string]$TailscaleIP)
+    
+    # Try to read peer-info.json from the Backups share
+    $remotePath = "\\$TailscaleIP\Backups\peer-info.json"
+    
+    try {
+        if (Test-Path $remotePath -ErrorAction SilentlyContinue) {
+            $peerConfig = Get-Content $remotePath -Raw -ErrorAction Stop | ConvertFrom-Json
+            return $peerConfig
+        }
+    }
+    catch {
+        # Silently fail - peer may not be a storage peer
+    }
+    
+    return $null
+}
+
 function Get-StoragePeers {
     <#
     .SYNOPSIS
         Gets all configured storage peers with their current status and scores
+        Only returns peers belonging to the same CustomerCode
     #>
+    
+    # Get our local CustomerCode
+    $localCode = Get-LocalCustomerCode
+    if (-not $localCode) {
+        Write-Host "[WARN] This machine is not configured as a storage peer." -ForegroundColor Yellow
+        Write-Host "Run 'Add Storage Peer' first to set your customer code." -ForegroundColor Yellow
+        return @()
+    }
     
     if (-not (Test-Path $script:PeersFile)) {
         Update-PeerList | Out-Null
@@ -462,24 +534,35 @@ function Get-StoragePeers {
     $storagePeers = @()
     
     foreach ($peer in $peers) {
-        # Query each peer for its storage config (via shared file or API call)
-        # For now, we'll use local knowledge + ping status
-        
         $pingResult = Test-PeerConnectivity -TailscaleIP $peer.TailscaleIP
         
         if ($pingResult.Success) {
-            # Calculate score
-            $score = Get-PeerScore -PingMs $pingResult.PingMs -FreePct 50 -JobsHosted 0
+            # Try to get peer's config to check CustomerCode
+            $peerConfig = Get-PeerConfig -TailscaleIP $peer.TailscaleIP
             
-            $storagePeers += [PSCustomObject]@{
-                HostName = $peer.HostName
-                TailscaleIP = $peer.TailscaleIP
-                PingMs = $pingResult.PingMs
-                Score = $score
-                Online = $true
-                # These would come from peer config in full implementation
-                FreePct = 50
-                JobsHosted = 0
+            # Only include peers with matching CustomerCode
+            if ($peerConfig -and $peerConfig.CustomerCode -eq $localCode) {
+                # Get storage stats from peer config
+                $freePct = 50  # Default, could calculate from QuotaGB and used space
+                $jobsHosted = 0
+                
+                if ($peerConfig.QuotaGB -and $peerConfig.UsedGB) {
+                    $freePct = [math]::Round((1 - ($peerConfig.UsedGB / $peerConfig.QuotaGB)) * 100, 0)
+                }
+                
+                $score = Get-PeerScore -PingMs $pingResult.PingMs -FreePct $freePct -JobsHosted $jobsHosted
+                
+                $storagePeers += [PSCustomObject]@{
+                    HostName = $peer.HostName
+                    TailscaleIP = $peer.TailscaleIP
+                    CustomerCode = $peerConfig.CustomerCode
+                    PingMs = $pingResult.PingMs
+                    Score = $score
+                    Online = $true
+                    FreePct = $freePct
+                    JobsHosted = $jobsHosted
+                    QuotaGB = $peerConfig.QuotaGB
+                }
             }
         }
     }
@@ -538,12 +621,31 @@ function Show-StoragePeers {
     Write-Host "    AVAILABLE STORAGE NODES" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
     
+    # Check if we have a local CustomerCode
+    $localCode = Get-LocalCustomerCode
+    if (-not $localCode) {
+        Write-Host "This machine is not configured as a storage node." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Please run 'Add Storage Peer' (P) first to:" -ForegroundColor White
+        Write-Host "  1. Set your customer code" -ForegroundColor Gray
+        Write-Host "  2. Configure storage location" -ForegroundColor Gray
+        Write-Host "  3. Join the resilience ring" -ForegroundColor Gray
+        Write-Host ""
+        Read-Host "Press Enter to continue"
+        return
+    }
+    
+    Write-Host "Customer: $localCode" -ForegroundColor Cyan
     Write-Host "Scanning..." -ForegroundColor Gray
     $peers = Get-StoragePeers
     
     if ($peers.Count -eq 0) {
-        Write-Host "No storage nodes available." -ForegroundColor Yellow
-        Write-Host "Configure other machines as storage nodes to add them to the ring." -ForegroundColor Gray
+        Write-Host "`nNo storage nodes found for customer '$localCode'." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "This could mean:" -ForegroundColor Gray
+        Write-Host "  - Other machines haven't been configured yet" -ForegroundColor Gray
+        Write-Host "  - Other machines are offline" -ForegroundColor Gray
+        Write-Host "  - Network share 'Backups' is not accessible on peers" -ForegroundColor Gray
     }
     else {
         Write-Host "`n  #  | Score | Ping   | Node ID    | Free  | Jobs" -ForegroundColor Gray
