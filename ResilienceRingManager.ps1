@@ -3,13 +3,13 @@
 <#
 .SYNOPSIS
     VLABS Resilience Ring Manager - Multi-ring monitoring and management
-    
+
 .DESCRIPTION
     Connects to multiple Resilience Rings via Tailscale tags to:
     - Monitor backup jobs and peer health across all rings
     - Generate statistics for monthly invoicing
     - Alert on problems with peers or backup jobs
-    
+
     "I inform promptly of any problem with any peer or backup job,
      so we, the managers can fix fast in order to invoice and collect
      every month for every ring."
@@ -25,7 +25,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.0.5'
+$script:AppVersion = '1.0.6'
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -49,12 +49,12 @@ function Write-Log {
         [ValidateSet('INFO','WARNING','ERROR','SUCCESS')]
         [string]$Level = 'INFO'
     )
-    
+
     try {
         if (-not (Test-Path $script:LogPath)) {
             New-Item -Path $script:LogPath -ItemType Directory -Force | Out-Null
         }
-        
+
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
         $logFile = Join-Path $script:LogPath "RRM_$(Get-Date -Format 'yyyyMMdd').log"
         Add-Content -Path $logFile -Value "[$timestamp] [$Level] $Message" -ErrorAction Stop
@@ -79,22 +79,22 @@ function Get-LatestRRMVersion {
 
 function Test-RRMUpdateAvailable {
     param([switch]$Silent)
-    
+
     if (-not $Silent) {
         Write-Host "Checking for updates..." -ForegroundColor Gray -NoNewline
     }
-    
+
     $latestVersion = Get-LatestRRMVersion
-    
+
     if ($null -eq $latestVersion) {
         if (-not $Silent) { Write-Host " [OFFLINE]" -ForegroundColor Yellow }
         return @{ Available = $false; Reason = "Could not reach GitHub" }
     }
-    
+
     try {
         $current = [Version]$script:AppVersion
         $latest = [Version]$latestVersion
-        
+
         if ($latest -gt $current) {
             if (-not $Silent) { Write-Host " [UPDATE AVAILABLE: v$latestVersion]" -ForegroundColor Cyan }
             return @{ Available = $true; CurrentVersion = $script:AppVersion; LatestVersion = $latestVersion }
@@ -114,41 +114,41 @@ function Invoke-RRMUpdate {
     Write-Host "`n========================================" -ForegroundColor Cyan
     Write-Host "     RRM - UPDATE" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
-    
+
     $updateCheck = Test-RRMUpdateAvailable
-    
+
     if (-not $updateCheck.Available) {
         Write-Host "You are running the latest version ($script:AppVersion)" -ForegroundColor Green
         Read-Host "`nPress Enter to continue"
         return
     }
-    
+
     Write-Host "Current version: $($updateCheck.CurrentVersion)" -ForegroundColor Yellow
     Write-Host "Latest version:  $($updateCheck.LatestVersion)" -ForegroundColor Green
     Write-Host ""
     Write-Host "Update now? [Y/n]: " -NoNewline -ForegroundColor Yellow
     $response = Read-Host
-    
+
     if ($response -ne '' -and $response -notmatch '^[Yy]') {
         Write-Host "Update cancelled." -ForegroundColor Yellow
         Read-Host "Press Enter to continue"
         return
     }
-    
+
     Write-Host "`nUpdating..." -ForegroundColor Cyan
-    
+
     $gitAvailable = $null -ne (Get-Command git -ErrorAction SilentlyContinue)
     $gitRepo = Test-Path (Join-Path $script:InstallPath '.git')
-    
+
     if ($gitAvailable -and $gitRepo) {
         try {
             Push-Location $script:InstallPath
             git fetch origin $script:RepoBranch 2>&1 | Out-Null
             git reset --hard "origin/$script:RepoBranch" 2>&1 | Out-Null
             Pop-Location
-            
+
             Get-ChildItem -Path $script:InstallPath -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
-            
+
             Write-Host "`nUpdate successful! Please restart RRM." -ForegroundColor Green
             Read-Host "Press Enter to exit"
             exit 0
@@ -162,7 +162,7 @@ function Invoke-RRMUpdate {
         Write-Host "Git not available. Please reinstall using:" -ForegroundColor Yellow
         Write-Host "iex (irm https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/install-rrm.ps1)" -ForegroundColor White
     }
-    
+
     Read-Host "`nPress Enter to continue"
 }
 
@@ -175,7 +175,7 @@ function Test-TailscaleReady {
     if (-not $tailscale) {
         return @{ Ready = $false; Reason = "Tailscale not installed" }
     }
-    
+
     try {
         $status = tailscale status --json 2>$null | ConvertFrom-Json
         if ($status.BackendState -eq 'Running') {
@@ -192,14 +192,14 @@ function Test-TailscaleReady {
 
 function Get-TailscalePeersByTag {
     param([string]$Tag)
-    
+
     try {
         $status = tailscale status --json 2>$null | ConvertFrom-Json
         $peers = @()
-        
+
         foreach ($peerProp in $status.Peer.PSObject.Properties) {
             $peer = $peerProp.Value
-            
+
             # Check if peer has the tag
             if ($peer.Tags -and ($peer.Tags -contains $Tag -or $peer.Tags -contains "tag:$Tag")) {
                 $peers += [PSCustomObject]@{
@@ -214,7 +214,7 @@ function Get-TailscalePeersByTag {
                 }
             }
         }
-        
+
         return $peers
     }
     catch {
@@ -231,7 +231,7 @@ function Get-SavedRings {
     if (-not (Test-Path $script:RingsFile)) {
         return @()
     }
-    
+
     try {
         $content = Get-Content $script:RingsFile -Raw | ConvertFrom-Json
         # Ensure it's an array
@@ -246,11 +246,11 @@ function Get-SavedRings {
 
 function Save-Rings {
     param($Rings)
-    
+
     if (-not (Test-Path $script:DataPath)) {
         New-Item -Path $script:DataPath -ItemType Directory -Force | Out-Null
     }
-    
+
     $Rings | ConvertTo-Json -Depth 10 | Set-Content $script:RingsFile -Force
 }
 
@@ -263,7 +263,7 @@ function Get-PeerData {
         [string]$TailscaleIP,
         [string]$CustomerCode
     )
-    
+
     $sharePath = "\\$TailscaleIP\RR_Backups"
     $result = @{
         Connected = $false
@@ -272,11 +272,11 @@ function Get-PeerData {
         ConfigFound = $false
         PeerConfig = $null
     }
-    
+
     try {
         # Try to connect without credentials first (for discovery)
         # We need to know the customer code to generate the password
-        
+
         if ([string]::IsNullOrEmpty($CustomerCode)) {
             # Try to access the share to see if it exists
             $testPath = Test-Path $sharePath -ErrorAction SilentlyContinue
@@ -287,7 +287,7 @@ function Get-PeerData {
         else {
             # Generate service account password from customer code
             $password = Get-RRMServicePassword -CustomerCode $CustomerCode
-            
+
             # Try to connect - capture all output
             try {
                 $netResult = cmd /c "net use `"$sharePath`" /user:RR_Service `"$password`" 2>&1"
@@ -297,7 +297,7 @@ function Get-PeerData {
                 $result.Error = "Exception: $_"
                 return $result
             }
-            
+
             if ($exitCode -ne 0) {
                 # Store error for debugging
                 $result.Error = "$netResult"
@@ -305,9 +305,9 @@ function Get-PeerData {
                 return $result
             }
         }
-        
+
         $result.Connected = $true
-        
+
         # Find customer folder
         $customerPath = $null
         if ($CustomerCode) {
@@ -320,17 +320,17 @@ function Get-PeerData {
                 $customerPath = $folders[0].FullName
             }
         }
-        
+
         if ($customerPath -and (Test-Path $customerPath)) {
             # Calculate storage used
-            $size = (Get-ChildItem $customerPath -Recurse -File -ErrorAction SilentlyContinue | 
+            $size = (Get-ChildItem $customerPath -Recurse -File -ErrorAction SilentlyContinue |
                      Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
             $result.StorageUsedGB = [math]::Round(($size / 1GB), 2)
         }
-        
+
         # Try to read peer's config from ProgramData share (if accessible)
         # For now, we just calculate storage
-        
+
     }
     catch {
         $result.Error = "$_"
@@ -342,7 +342,7 @@ function Get-PeerData {
             try { net use $sharePath /delete 2>&1 | Out-Null } catch { }
         }
     }
-    
+
     return $result
 }
 
@@ -353,16 +353,16 @@ function Get-RRMServicePassword {
         (MUST match Get-RingServicePassword in PeerManagement.ps1)
     #>
     param([string]$CustomerCode)
-    
+
     # Same algorithm as Resilience Ring client
     $salt = "ResilienceRing2026!"
     $combined = "$CustomerCode$salt"
-    
+
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($combined)
     $hash = $sha256.ComputeHash($bytes)
     $hashString = [BitConverter]::ToString($hash) -replace '-', ''
-    
+
     # Take first 12 chars + add complexity requirements
     $password = $hashString.Substring(0, 12) + "Rr1!"
     return $password
@@ -377,20 +377,20 @@ function Get-RingStatistics {
         [string]$Tag,
         [string]$CustomerCode
     )
-    
+
     Write-Host "Scanning ring: $Tag" -ForegroundColor Cyan
     Write-Host ""
-    
+
     # Get all peers with this tag
     $peers = Get-TailscalePeersByTag -Tag $Tag
-    
+
     if ($peers.Count -eq 0) {
         Write-Host "No peers found with tag: $Tag" -ForegroundColor Yellow
         return $null
     }
-    
+
     Write-Host "Found $($peers.Count) peer(s)" -ForegroundColor Green
-    
+
     $stats = @{
         Tag = $Tag
         CustomerCode = $CustomerCode
@@ -405,10 +405,10 @@ function Get-RingStatistics {
         Peers = @()
         Problems = @()
     }
-    
+
     foreach ($peer in $peers) {
         Write-Host "  Checking $($peer.HostName)..." -ForegroundColor Gray -NoNewline
-        
+
         $peerStats = @{
             Hostname = $peer.HostName
             TailscaleIP = $peer.TailscaleIP
@@ -418,13 +418,13 @@ function Get-RingStatistics {
             Jobs = @()
             Status = "Unknown"
         }
-        
+
         if ($peer.Online) {
             $stats.OnlinePeers++
-            
+
             # Get peer data
             $peerData = Get-PeerData -TailscaleIP $peer.TailscaleIP -CustomerCode $CustomerCode
-            
+
             if ($peerData.Connected) {
                 $peerStats.StorageUsedGB = $peerData.StorageUsedGB
                 $peerStats.Status = "OK"
@@ -444,10 +444,10 @@ function Get-RingStatistics {
             $stats.Problems += "$($peer.HostName) is offline (last seen: $($peer.LastSeen))"
             Write-Host " OFFLINE" -ForegroundColor Red
         }
-        
+
         $stats.Peers += $peerStats
     }
-    
+
     return $stats
 }
 
@@ -460,7 +460,7 @@ function Connect-ToNewRing {
     Write-Host "`n========================================" -ForegroundColor Cyan
     Write-Host "     CONNECT TO NEW RING" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
-    
+
     # Check Tailscale
     $tsStatus = Test-TailscaleReady
     if (-not $tsStatus.Ready) {
@@ -470,28 +470,28 @@ function Connect-ToNewRing {
         Read-Host "`nPress Enter to continue"
         return
     }
-    
+
     Write-Host "[OK] Tailscale connected" -ForegroundColor Green
     Write-Host ""
-    
+
     # Get ring tag
     Write-Host "Enter the Tailscale tag for this ring." -ForegroundColor White
     Write-Host "Example: rr-acme, rr-mesker, rr-storage" -ForegroundColor Gray
     Write-Host "(Do not include 'tag:' prefix)" -ForegroundColor Gray
     Write-Host ""
     $tagInput = Read-Host "Ring Tag"
-    
+
     if ([string]::IsNullOrWhiteSpace($tagInput)) {
         Write-Host "Cancelled." -ForegroundColor Yellow
         Read-Host "`nPress Enter to continue"
         return
     }
-    
+
     # Normalize tag
     $tag = $tagInput.Trim().ToLower()
     if ($tag.StartsWith("tag:")) { $tag = $tag.Substring(4) }
     $fullTag = "tag:$tag"
-    
+
     # Check if already added
     $rings = Get-SavedRings
     if ($rings | Where-Object { $_.Tag -eq $fullTag }) {
@@ -499,12 +499,12 @@ function Connect-ToNewRing {
         Read-Host "`nPress Enter to continue"
         return
     }
-    
+
     Write-Host ""
-    
+
     # Scan for peers
     $peers = Get-TailscalePeersByTag -Tag $fullTag
-    
+
     if ($peers.Count -eq 0) {
         Write-Host "No peers found with tag: $fullTag" -ForegroundColor Red
         Write-Host ""
@@ -515,40 +515,41 @@ function Connect-ToNewRing {
         Read-Host "`nPress Enter to continue"
         return
     }
-    
+
     Write-Host "Found $($peers.Count) peer(s) with tag: $fullTag" -ForegroundColor Green
     Write-Host ""
-    
+
     foreach ($peer in $peers) {
         $status = if ($peer.Online) { "[ONLINE]" } else { "[OFFLINE]" }
         $statusColor = if ($peer.Online) { "Green" } else { "Red" }
         Write-Host "  $($peer.HostName) ($($peer.TailscaleIP)) " -NoNewline
         Write-Host $status -ForegroundColor $statusColor
     }
-    
+
     Write-Host ""
-    
+
     # Get customer code
     Write-Host "Enter the Customer Code for this ring." -ForegroundColor White
     Write-Host "This is used to connect to peer shares." -ForegroundColor Gray
     Write-Host "Example: ACME, MESKER, MMI" -ForegroundColor Gray
     Write-Host ""
     $customerCode = Read-Host "Customer Code"
-    
+
     if ([string]::IsNullOrWhiteSpace($customerCode)) {
         Write-Host "Cancelled." -ForegroundColor Yellow
         Read-Host "`nPress Enter to continue"
         return
     }
-    
-    $customerCode = $customerCode.Trim().ToUpper()
-    
+
+    $customerCode = $customerCode.Trim().ToLower()  # MUST match PeerManagement.ps1 which uses lowercase
+    $customerCodeDisplay = $customerCode.ToUpper()  # For display only
+
     # Get friendly name
     Write-Host ""
-    Write-Host "Enter a friendly name for this ring (or press Enter to use '$customerCode')" -ForegroundColor White
+    Write-Host "Enter a friendly name for this ring (or press Enter to use '$customerCodeDisplay')" -ForegroundColor White
     $ringName = Read-Host "Ring Name"
-    if ([string]::IsNullOrWhiteSpace($ringName)) { $ringName = $customerCode }
-    
+    if ([string]::IsNullOrWhiteSpace($ringName)) { $ringName = $customerCodeDisplay }
+
     # Save the ring
     $newRing = @{
         Name = $ringName
@@ -558,10 +559,10 @@ function Connect-ToNewRing {
         LastScan = $null
         PeerCount = $peers.Count
     }
-    
+
     $rings += $newRing
     Save-Rings -Rings $rings
-    
+
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Green
     Write-Host "  RING ADDED SUCCESSFULLY!" -ForegroundColor Green
@@ -572,9 +573,9 @@ function Connect-ToNewRing {
     Write-Host "  Customer: $customerCode" -ForegroundColor White
     Write-Host "  Peers:    $($peers.Count)" -ForegroundColor White
     Write-Host ""
-    
+
     Write-Log "Added new ring: $ringName ($fullTag)" -Level SUCCESS
-    
+
     Read-Host "Press Enter to continue"
 }
 
@@ -583,9 +584,9 @@ function Show-AllRings {
     Write-Host "`n========================================" -ForegroundColor Cyan
     Write-Host "     ALL CONNECTED RINGS" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
-    
+
     $rings = Get-SavedRings
-    
+
     if ($rings.Count -eq 0) {
         Write-Host "No rings configured yet." -ForegroundColor Yellow
         Write-Host ""
@@ -593,21 +594,21 @@ function Show-AllRings {
         Read-Host "`nPress Enter to continue"
         return
     }
-    
+
     Write-Host "  # | Name                | Tag                    | Peers | Last Scan" -ForegroundColor White
     Write-Host "  --|---------------------|------------------------|-------|-------------------" -ForegroundColor Gray
-    
+
     $i = 1
     foreach ($ring in $rings) {
         $lastScan = if ($ring.LastScan) { $ring.LastScan } else { "Never" }
-        Write-Host ("  {0} | {1,-19} | {2,-22} | {3,5} | {4}" -f $i, 
+        Write-Host ("  {0} | {1,-19} | {2,-22} | {3,5} | {4}" -f $i,
             $ring.Name.Substring(0, [Math]::Min(19, $ring.Name.Length)),
             $ring.Tag.Substring(0, [Math]::Min(22, $ring.Tag.Length)),
             $ring.PeerCount,
             $lastScan)
         $i++
     }
-    
+
     Write-Host ""
     Read-Host "Press Enter to continue"
 }
@@ -622,23 +623,23 @@ function Show-RingStatistics {
         Read-Host "`nPress Enter to continue"
         return
     }
-    
+
     Clear-Host
     Write-Host "`n========================================" -ForegroundColor Cyan
     Write-Host "     RING STATISTICS" -ForegroundColor Cyan
     Write-Host "     $($script:ActiveRing.Name)" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
-    
+
     # Get fresh statistics
     $stats = Get-RingStatistics -Tag $script:ActiveRing.Tag -CustomerCode $script:ActiveRing.CustomerCode
-    
+
     if (-not $stats) {
         Read-Host "`nPress Enter to continue"
         return
     }
-    
+
     $script:ActiveRingData = $stats
-    
+
     # Update last scan time
     [array]$rings = @(Get-SavedRings)
     for ($i = 0; $i -lt $rings.Count; $i++) {
@@ -649,7 +650,7 @@ function Show-RingStatistics {
             break
         }
     }
-    
+
     Write-Host ""
     Write-Host "========================================" -ForegroundColor White
     Write-Host "  SUMMARY" -ForegroundColor Yellow
@@ -665,7 +666,7 @@ function Show-RingStatistics {
     Write-Host ""
     Write-Host "  Storage Used:   $($stats.TotalUsedGB) GB" -ForegroundColor White
     Write-Host ""
-    
+
     # Peer details
     Write-Host "========================================" -ForegroundColor White
     Write-Host "  PEER DETAILS" -ForegroundColor Yellow
@@ -673,21 +674,21 @@ function Show-RingStatistics {
     Write-Host ""
     Write-Host "  Hostname              | IP               | Status    | Storage" -ForegroundColor Gray
     Write-Host "  ----------------------|------------------|-----------|--------" -ForegroundColor Gray
-    
+
     foreach ($peer in $stats.Peers) {
         $statusColor = switch ($peer.Status) {
             "OK" { "Green" }
             "Offline" { "Red" }
             default { "Yellow" }
         }
-        
-        Write-Host ("  {0,-21} | {1,-16} | " -f 
+
+        Write-Host ("  {0,-21} | {1,-16} | " -f
             $peer.Hostname.Substring(0, [Math]::Min(21, $peer.Hostname.Length)),
             $peer.TailscaleIP) -NoNewline
         Write-Host ("{0,-9}" -f $peer.Status) -ForegroundColor $statusColor -NoNewline
         Write-Host " | $($peer.StorageUsedGB) GB"
     }
-    
+
     # Problems
     if ($stats.Problems.Count -gt 0) {
         Write-Host ""
@@ -699,9 +700,9 @@ function Show-RingStatistics {
             Write-Host "  ! $problem" -ForegroundColor Red
         }
     }
-    
+
     Write-Host ""
-    
+
     # Invoicing info
     Write-Host "========================================" -ForegroundColor White
     Write-Host "  INVOICING (Active Peers)" -ForegroundColor Yellow
@@ -709,7 +710,7 @@ function Show-RingStatistics {
     Write-Host ""
     Write-Host "  Billable Peers: $($stats.OnlinePeers)" -ForegroundColor Cyan
     Write-Host ""
-    
+
     Read-Host "Press Enter to continue"
 }
 
@@ -719,19 +720,19 @@ function Show-AllBackupJobs {
         Read-Host "`nPress Enter to continue"
         return
     }
-    
+
     Clear-Host
     Write-Host "`n========================================" -ForegroundColor Cyan
     Write-Host "     ALL BACKUP JOBS" -ForegroundColor Cyan
     Write-Host "     $($script:ActiveRing.Name)" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
-    
+
     Write-Host "This feature will scan all peers and aggregate backup jobs." -ForegroundColor Yellow
     Write-Host "Coming in next version!" -ForegroundColor Gray
     Write-Host ""
-    
+
     # TODO: Iterate peers, read their jobs.json, aggregate
-    
+
     Read-Host "Press Enter to continue"
 }
 
@@ -741,17 +742,17 @@ function Show-PeerHealth {
         Read-Host "`nPress Enter to continue"
         return
     }
-    
+
     Clear-Host
     Write-Host "`n========================================" -ForegroundColor Cyan
     Write-Host "     PEER HEALTH" -ForegroundColor Cyan
     Write-Host "     $($script:ActiveRing.Name)" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
-    
+
     Write-Host "This feature will show detailed health for each peer." -ForegroundColor Yellow
     Write-Host "Coming in next version!" -ForegroundColor Gray
     Write-Host ""
-    
+
     Read-Host "Press Enter to continue"
 }
 
@@ -764,29 +765,29 @@ function Show-RingSelector {
     .SYNOPSIS
         Shows ring selector at startup and returns selected ring
     #>
-    
+
     # Force array context to handle single-ring case
     [array]$rings = @(Get-SavedRings)
-    
+
     if ($rings.Count -eq 0) {
         Write-Host "No rings configured yet." -ForegroundColor Yellow
         Write-Host ""
         Write-Host "Would you like to connect to a ring now? [Y/n]: " -NoNewline
         $response = Read-Host
-        
+
         if ($response -eq '' -or $response -match '^[Yy]') {
             Connect-ToNewRing
             [array]$rings = @(Get-SavedRings)
         }
-        
+
         if ($rings.Count -eq 0) {
             return $null
         }
     }
-    
+
     # Quick scan all rings for peer count
     Write-Host "Scanning rings..." -ForegroundColor Gray
-    
+
     foreach ($ring in $rings) {
         Write-Host "  $($ring.Name)..." -ForegroundColor Gray -NoNewline
         $peers = Get-TailscalePeersByTag -Tag $ring.Tag
@@ -794,43 +795,43 @@ function Show-RingSelector {
         $online = ($peers | Where-Object { $_.Online }).Count
         Write-Host " $online/$($peers.Count) online" -ForegroundColor $(if ($online -eq $peers.Count) { "Green" } else { "Yellow" })
     }
-    
+
     Save-Rings -Rings $rings
-    
+
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host "     SELECT WORKING RING" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
-    
+
     $i = 1
     foreach ($ring in $rings) {
         Write-Host "  $i. $($ring.Name) ($($ring.Tag)) - $($ring.PeerCount) peers" -ForegroundColor White
         $i++
     }
-    
+
     Write-Host ""
     Write-Host "  C. Connect to new ring" -ForegroundColor Gray
     Write-Host "  0. Exit" -ForegroundColor Gray
     Write-Host ""
-    
+
     while ($true) {
         $choice = Read-Host "Select ring"
-        
+
         if ($choice -eq '0') {
             return $null
         }
-        
+
         if ($choice.ToUpper() -eq 'C') {
             Connect-ToNewRing
             return Show-RingSelector  # Recurse to show updated list
         }
-        
+
         $index = 0
         if ([int]::TryParse($choice, [ref]$index) -and $index -ge 1 -and $index -le $rings.Count) {
             return $rings[$index - 1]
         }
-        
+
         Write-Host "Invalid choice. Try again." -ForegroundColor Yellow
     }
 }
@@ -845,32 +846,32 @@ function Show-MainMenu {
     Write-Host "  VLABS RESILIENCE RING MANAGER" -ForegroundColor Cyan
     Write-Host "            v$script:AppVersion" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
-    
+
     if ($script:ActiveRing) {
         Write-Host ""
         Write-Host "  Working Ring: " -NoNewline -ForegroundColor Gray
         Write-Host "$($script:ActiveRing.Name)" -ForegroundColor Yellow
         Write-Host "  Tag: $($script:ActiveRing.Tag)" -ForegroundColor Gray
     }
-    
+
     Write-Host "`n----------------------------------------" -ForegroundColor Gray
-    
+
     Write-Host ""
     Write-Host " RING DATA" -ForegroundColor Yellow
     Write-Host "   1. Show Ring Statistics" -ForegroundColor White
     Write-Host "   2. Show All Backup Jobs" -ForegroundColor White
     Write-Host "   3. Show Peer Health" -ForegroundColor White
-    
+
     Write-Host ""
     Write-Host " RING MANAGEMENT" -ForegroundColor Yellow
     Write-Host "   C. Connect to New Ring" -ForegroundColor White
     Write-Host "   5. Show All Connected Rings" -ForegroundColor White
-    
+
     Write-Host ""
     Write-Host " SYSTEM" -ForegroundColor Yellow
     Write-Host "   U. Check for Updates" -ForegroundColor White
     Write-Host "   0. Exit (to switch ring)" -ForegroundColor White
-    
+
     Write-Host "`n========================================" -ForegroundColor Cyan
 }
 
@@ -878,7 +879,7 @@ function Start-MainLoop {
     while ($true) {
         Show-MainMenu
         $choice = Read-Host "`nEnter your choice"
-        
+
         switch ($choice.ToUpper()) {
             "1" { Show-RingStatistics }
             "2" { Show-AllBackupJobs }
