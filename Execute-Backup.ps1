@@ -75,7 +75,12 @@ function Save-Jobs {
 }
 
 function Update-JobStatus {
-    param([string]$JobName, [string]$Status)
+    param(
+        [string]$JobName, 
+        [string]$Status,
+        [int]$DurationSeconds = 0,
+        [long]$SizeBytes = 0
+    )
     
     $jobs = Get-Jobs
     if (-not $jobs) { return }
@@ -84,9 +89,79 @@ function Update-JobStatus {
         if ($jobs[$i].JobName -eq $JobName) {
             $jobs[$i].LastRun = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
             $jobs[$i].LastStatus = $Status
+            $jobs[$i].LastDurationSeconds = $DurationSeconds
+            $jobs[$i].LastSizeBytes = $SizeBytes
             Save-Jobs -Jobs $jobs
             return
         }
+    }
+}
+
+function Publish-NodeStatus {
+    <#
+    .SYNOPSIS
+        Publishes this node's job status to the local RR_Backups share for RRM to read
+    #>
+    try {
+        $config = Get-RingConfig
+        if (-not $config -or -not $config.CustomerCode) { return }
+        
+        # Get local storage path from config
+        $storagePath = $config.StoragePath
+        if (-not $storagePath -or -not (Test-Path $storagePath)) { return }
+        
+        # Create _nodeinfo folder
+        $nodeInfoPath = Join-Path $storagePath "_nodeinfo"
+        if (-not (Test-Path $nodeInfoPath)) {
+            New-Item -Path $nodeInfoPath -ItemType Directory -Force | Out-Null
+        }
+        
+        # Get all jobs
+        $jobs = Get-Jobs
+        if (-not $jobs) { $jobs = @() }
+        
+        # Build status object
+        $tsHostname = ""
+        try {
+            $tsStatus = tailscale status --json 2>$null | ConvertFrom-Json
+            $tsHostname = $tsStatus.Self.DNSName -replace '\..*$', ''
+        } catch { $tsHostname = $env:COMPUTERNAME }
+        
+        $nodeStatus = @{
+            NodeHostname = $tsHostname
+            CustomerCode = $config.CustomerCode
+            Location = $config.Location
+            LastUpdated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            Jobs = @()
+        }
+        
+        foreach ($job in $jobs) {
+            $nodeStatus.Jobs += @{
+                JobName = $job.JobName
+                AppName = $job.AppName
+                BackupType = $job.BackupType
+                BackupObject = $job.BackupObject
+                SourceLocation = $job.SourceLocation
+                Enabled = $job.Enabled
+                LastRun = $job.LastRun
+                LastStatus = $job.LastStatus
+                LastDurationSeconds = $job.LastDurationSeconds
+                LastSizeBytes = $job.LastSizeBytes
+                Frequency = $job.Frequency
+                RetentionMonthly = $job.RetentionMonthly
+                RetentionWeekly = $job.RetentionWeekly
+                RetentionRecent = $job.RetentionRecent
+            }
+        }
+        
+        # Save to share
+        $statusFile = Join-Path $nodeInfoPath "jobs-status.json"
+        $nodeStatus | ConvertTo-Json -Depth 10 | Set-Content $statusFile -Force
+        
+        Write-Log "Published node status to $statusFile" -Level INFO
+    }
+    catch {
+        Write-Log "Failed to publish node status: $_" -Level WARNING
     }
 }
 
@@ -578,6 +653,7 @@ function Invoke-LegacyBackup {
 function Invoke-BackupJob {
     param([string]$JobName)
     
+    $startTime = Get-Date
     Write-Log "=== Backup Job Started: $JobName ===" -Level INFO
     
     $jobs = Get-Jobs
@@ -597,10 +673,23 @@ function Invoke-BackupJob {
     
     # Determine job type and execute
     $success = $false
+    $sizeBytes = 0
     
     if ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) {
         # New unified backup with retention
         $success = Invoke-UnifiedBackup -Job $job
+        
+        # Calculate source size
+        try {
+            if ($job.BackupType -eq 'F') {
+                $sizeBytes = (Get-Item $job.BackupObject -ErrorAction SilentlyContinue).Length
+            }
+            else {
+                $sizeBytes = (Get-ChildItem $job.BackupObject -Recurse -File -ErrorAction SilentlyContinue | 
+                              Measure-Object -Property Length -Sum).Sum
+            }
+        }
+        catch { $sizeBytes = 0 }
     }
     elseif ($job.DestinationPath) {
         # Legacy single-destination backup
@@ -610,10 +699,16 @@ function Invoke-BackupJob {
         Write-Log "Job has no valid destination configuration" -Level ERROR
     }
     
-    $finalStatus = if ($success) { "Success" } else { "Failed" }
-    Update-JobStatus -JobName $JobName -Status $finalStatus
+    $endTime = Get-Date
+    $durationSeconds = [int]($endTime - $startTime).TotalSeconds
     
-    Write-Log "=== Backup Job Completed: $JobName - $finalStatus ===" -Level $(if($success){'SUCCESS'}else{'ERROR'})
+    $finalStatus = if ($success) { "Success" } else { "Failed" }
+    Update-JobStatus -JobName $JobName -Status $finalStatus -DurationSeconds $durationSeconds -SizeBytes $sizeBytes
+    
+    # Publish status to share for RRM
+    Publish-NodeStatus
+    
+    Write-Log "=== Backup Job Completed: $JobName - $finalStatus (${durationSeconds}s) ===" -Level $(if($success){'SUCCESS'}else{'ERROR'})
     
     return $success
 }

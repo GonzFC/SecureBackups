@@ -25,7 +25,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.0.8'
+$script:AppVersion = '1.0.9'
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -745,6 +745,55 @@ function Show-RingStatistics {
     Read-Host "Press Enter to continue"
 }
 
+function Get-PeerJobStatus {
+    <#
+    .SYNOPSIS
+        Reads job status from a peer's _nodeinfo/jobs-status.json
+    #>
+    param(
+        [string]$TailscaleIP,
+        [string]$CustomerCode
+    )
+    
+    $sharePath = "\\$TailscaleIP\RR_Backups"
+    $result = $null
+    
+    try {
+        # Connect
+        $password = Get-RRMServicePassword -CustomerCode $CustomerCode
+        $netResult = cmd /c "net use `"$sharePath`" /user:RR_Service `"$password`" 2>&1"
+        if ($LASTEXITCODE -ne 0) { return $null }
+        
+        # Read status file
+        $statusFile = Join-Path $sharePath "_nodeinfo\jobs-status.json"
+        if (Test-Path $statusFile) {
+            $result = Get-Content $statusFile -Raw | ConvertFrom-Json
+        }
+    }
+    catch { }
+    finally {
+        try { net use $sharePath /delete 2>&1 | Out-Null } catch { }
+    }
+    
+    return $result
+}
+
+function Format-Duration {
+    param([int]$Seconds)
+    if ($Seconds -lt 60) { return "${Seconds}s" }
+    if ($Seconds -lt 3600) { return "$([math]::Floor($Seconds/60))m $($Seconds%60)s" }
+    return "$([math]::Floor($Seconds/3600))h $([math]::Floor(($Seconds%3600)/60))m"
+}
+
+function Format-Size {
+    param([long]$Bytes)
+    if (-not $Bytes -or $Bytes -eq 0) { return "-" }
+    if ($Bytes -lt 1KB) { return "$Bytes B" }
+    if ($Bytes -lt 1MB) { return "$([math]::Round($Bytes/1KB, 1)) KB" }
+    if ($Bytes -lt 1GB) { return "$([math]::Round($Bytes/1MB, 1)) MB" }
+    return "$([math]::Round($Bytes/1GB, 2)) GB"
+}
+
 function Show-AllBackupJobs {
     if (-not $script:ActiveRing) {
         Write-Host "No ring selected!" -ForegroundColor Red
@@ -758,13 +807,198 @@ function Show-AllBackupJobs {
     Write-Host "     $($script:ActiveRing.Name)" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
 
-    Write-Host "This feature will scan all peers and aggregate backup jobs." -ForegroundColor Yellow
-    Write-Host "Coming in next version!" -ForegroundColor Gray
+    # Get all peers
+    $peers = Get-TailscalePeersByTag -Tag $script:ActiveRing.Tag
+    
+    if ($peers.Count -eq 0) {
+        Write-Host "No peers found!" -ForegroundColor Red
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+    
+    Write-Host "Scanning $($peers.Count) peer(s) for backup jobs..." -ForegroundColor Gray
     Write-Host ""
-
-    # TODO: Iterate peers, read their jobs.json, aggregate
-
-    Read-Host "Press Enter to continue"
+    
+    # Collect all jobs from all peers
+    $allJobs = @()
+    $locations = @{}
+    $applications = @{}
+    
+    foreach ($peer in $peers) {
+        Write-Host "  $($peer.HostName)..." -ForegroundColor Gray -NoNewline
+        
+        if (-not $peer.Online -and -not $peer.IsSelf) {
+            Write-Host " OFFLINE" -ForegroundColor Red
+            continue
+        }
+        
+        # Skip self for now (can't connect to own share easily)
+        if ($peer.IsSelf) {
+            Write-Host " (self - reading local)" -ForegroundColor Gray
+            # Read local jobs directly
+            try {
+                $localJobsFile = "C:\ProgramData\VLABS_ResilienceRing\jobs.json"
+                if (Test-Path $localJobsFile) {
+                    $localJobs = Get-Content $localJobsFile -Raw | ConvertFrom-Json
+                    $config = $null
+                    $configFile = "C:\ProgramData\VLABS_ResilienceRing\ring-config.json"
+                    if (Test-Path $configFile) {
+                        $config = Get-Content $configFile -Raw | ConvertFrom-Json
+                    }
+                    
+                    foreach ($job in $localJobs) {
+                        $location = if ($job.SourceLocation) { $job.SourceLocation } elseif ($config) { $config.Location } else { $peer.HostName }
+                        $allJobs += [PSCustomObject]@{
+                            Location = $location
+                            AppName = $job.AppName
+                            ObjectName = Split-Path $job.BackupObject -Leaf
+                            BackupObject = $job.BackupObject
+                            Duration = if ($job.LastDurationSeconds) { Format-Duration $job.LastDurationSeconds } else { "-" }
+                            DurationSeconds = if ($job.LastDurationSeconds) { $job.LastDurationSeconds } else { 0 }
+                            Size = Format-Size $job.LastSizeBytes
+                            SizeBytes = if ($job.LastSizeBytes) { $job.LastSizeBytes } else { 0 }
+                            Status = if ($job.LastStatus) { $job.LastStatus } else { "Never Run" }
+                            LastRun = $job.LastRun
+                            Enabled = $job.Enabled
+                            PeerHostname = $peer.HostName
+                        }
+                        $locations[$location] = $true
+                        $applications[$job.AppName] = $true
+                    }
+                }
+            }
+            catch { Write-Host " ERROR" -ForegroundColor Red }
+            continue
+        }
+        
+        $peerStatus = Get-PeerJobStatus -TailscaleIP $peer.TailscaleIP -CustomerCode $script:ActiveRing.CustomerCode
+        
+        if ($peerStatus -and $peerStatus.Jobs) {
+            Write-Host " $($peerStatus.Jobs.Count) job(s)" -ForegroundColor Green
+            
+            foreach ($job in $peerStatus.Jobs) {
+                $location = if ($job.SourceLocation) { $job.SourceLocation } else { $peerStatus.Location }
+                $allJobs += [PSCustomObject]@{
+                    Location = $location
+                    AppName = $job.AppName
+                    ObjectName = Split-Path $job.BackupObject -Leaf
+                    BackupObject = $job.BackupObject
+                    Duration = if ($job.LastDurationSeconds) { Format-Duration $job.LastDurationSeconds } else { "-" }
+                    DurationSeconds = if ($job.LastDurationSeconds) { $job.LastDurationSeconds } else { 0 }
+                    Size = Format-Size $job.LastSizeBytes
+                    SizeBytes = if ($job.LastSizeBytes) { $job.LastSizeBytes } else { 0 }
+                    Status = if ($job.LastStatus) { $job.LastStatus } else { "Never Run" }
+                    LastRun = $job.LastRun
+                    Enabled = $job.Enabled
+                    PeerHostname = $peerStatus.NodeHostname
+                }
+                $locations[$location] = $true
+                $applications[$job.AppName] = $true
+            }
+        }
+        else {
+            Write-Host " no data" -ForegroundColor Yellow
+        }
+    }
+    
+    Write-Host ""
+    
+    if ($allJobs.Count -eq 0) {
+        Write-Host "No backup jobs found in this ring." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Jobs will appear here after peers run their first backup." -ForegroundColor Gray
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+    
+    # Filter options
+    $filterLocation = $null
+    $filterApp = $null
+    
+    Write-Host "Found $($allJobs.Count) backup job(s)" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Filter options:" -ForegroundColor Yellow
+    Write-Host "  L = Filter by Location" -ForegroundColor Gray
+    Write-Host "  A = Filter by Application" -ForegroundColor Gray
+    Write-Host "  Enter = Show all" -ForegroundColor Gray
+    Write-Host ""
+    $filterChoice = Read-Host "Filter"
+    
+    if ($filterChoice.ToUpper() -eq 'L' -and $locations.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Locations:" -ForegroundColor Yellow
+        $i = 1
+        $locList = @($locations.Keys | Sort-Object)
+        foreach ($loc in $locList) {
+            Write-Host "  $i. $loc" -ForegroundColor White
+            $i++
+        }
+        $locChoice = Read-Host "Select location (number)"
+        $locIndex = 0
+        if ([int]::TryParse($locChoice, [ref]$locIndex) -and $locIndex -ge 1 -and $locIndex -le $locList.Count) {
+            $filterLocation = $locList[$locIndex - 1]
+        }
+    }
+    elseif ($filterChoice.ToUpper() -eq 'A' -and $applications.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Applications:" -ForegroundColor Yellow
+        $i = 1
+        $appList = @($applications.Keys | Sort-Object)
+        foreach ($app in $appList) {
+            Write-Host "  $i. $app" -ForegroundColor White
+            $i++
+        }
+        $appChoice = Read-Host "Select application (number)"
+        $appIndex = 0
+        if ([int]::TryParse($appChoice, [ref]$appIndex) -and $appIndex -ge 1 -and $appIndex -le $appList.Count) {
+            $filterApp = $appList[$appIndex - 1]
+        }
+    }
+    
+    # Apply filters
+    $filteredJobs = $allJobs
+    if ($filterLocation) {
+        $filteredJobs = $filteredJobs | Where-Object { $_.Location -eq $filterLocation }
+    }
+    if ($filterApp) {
+        $filteredJobs = $filteredJobs | Where-Object { $_.AppName -eq $filterApp }
+    }
+    
+    # Display results
+    Clear-Host
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "     ALL BACKUP JOBS" -ForegroundColor Cyan
+    Write-Host "     $($script:ActiveRing.Name)" -ForegroundColor Cyan
+    if ($filterLocation) { Write-Host "     Location: $filterLocation" -ForegroundColor Gray }
+    if ($filterApp) { Write-Host "     Application: $filterApp" -ForegroundColor Gray }
+    Write-Host "========================================`n" -ForegroundColor Cyan
+    
+    # Table header
+    Write-Host ("{0,-20} {1,-25} {2,-10} {3,-10} {4,-10}" -f "Location", "Object Name", "Duration", "Size", "Status") -ForegroundColor White
+    Write-Host ("{0,-20} {1,-25} {2,-10} {3,-10} {4,-10}" -f "--------------------", "-------------------------", "----------", "----------", "----------") -ForegroundColor Gray
+    
+    foreach ($job in ($filteredJobs | Sort-Object Location, AppName)) {
+        $statusColor = switch ($job.Status) {
+            "Success" { "Green" }
+            "Failed" { "Red" }
+            "Running" { "Yellow" }
+            default { "Gray" }
+        }
+        
+        $locDisplay = $job.Location
+        if ($locDisplay.Length -gt 20) { $locDisplay = $locDisplay.Substring(0,17) + "..." }
+        
+        $objDisplay = $job.ObjectName
+        if ($objDisplay.Length -gt 25) { $objDisplay = $objDisplay.Substring(0,22) + "..." }
+        
+        Write-Host ("{0,-20} {1,-25} {2,-10} {3,-10} " -f $locDisplay, $objDisplay, $job.Duration, $job.Size) -NoNewline
+        Write-Host ("{0,-10}" -f $job.Status) -ForegroundColor $statusColor
+    }
+    
+    Write-Host ""
+    Write-Host "Total: $($filteredJobs.Count) job(s)" -ForegroundColor Cyan
+    
+    Read-Host "`nPress Enter to continue"
 }
 
 function Show-PeerHealth {
