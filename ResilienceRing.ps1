@@ -27,7 +27,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.8.1'
+$script:AppVersion = '1.8.2'
 $script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -494,9 +494,6 @@ function Show-MainMenu {
     Write-Host "   4. Run Backup Job Now" -ForegroundColor White
     Write-Host "   5. Show All Backup Jobs" -ForegroundColor White
 
-    Write-Host ""
-    Write-Host " STATUS" -ForegroundColor Yellow
-    Write-Host "   8. Show All Backup Jobs" -ForegroundColor White
     Write-Host ""
     Write-Host " STORAGE PEERS" -ForegroundColor Yellow
     Write-Host "   P. Add Storage Peer (configure this machine)" -ForegroundColor White
