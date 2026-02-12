@@ -25,7 +25,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.0.0'
+$script:AppVersion = '1.0.1'
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -744,7 +744,8 @@ function Show-RingSelector {
         Shows ring selector at startup and returns selected ring
     #>
     
-    $rings = Get-SavedRings
+    # Force array context to handle single-ring case
+    [array]$rings = @(Get-SavedRings)
     
     if ($rings.Count -eq 0) {
         Write-Host "No rings configured yet." -ForegroundColor Yellow
@@ -754,7 +755,7 @@ function Show-RingSelector {
         
         if ($response -eq '' -or $response -match '^[Yy]') {
             Connect-ToNewRing
-            $rings = Get-SavedRings
+            [array]$rings = @(Get-SavedRings)
         }
         
         if ($rings.Count -eq 0) {
