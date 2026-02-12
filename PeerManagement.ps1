@@ -22,11 +22,126 @@ $script:BaseDataPath = "C:\VLABS_ResilienceRing"
 $script:ConfigFile = Join-Path $script:BaseDataPath "ring-config.json"
 $script:StoragePeersFile = Join-Path $script:BaseDataPath "storage-peers.json"
 $script:ShareName = "RR_Backups"
+$script:ServiceUser = "RR_Service"
 
 # Ensure base data path exists
 if (-not (Test-Path $script:BaseDataPath)) {
     New-Item -Path $script:BaseDataPath -ItemType Directory -Force | Out-Null
 }
+
+#region Service Account Functions
+
+function Get-RingServicePassword {
+    <#
+    .SYNOPSIS
+        Generates a deterministic password based on CustomerCode
+        All nodes in the same ring will have the same password
+    #>
+    param([string]$CustomerCode)
+    
+    # Create deterministic password from CustomerCode + salt
+    $salt = "ResilienceRing2026!"
+    $combined = "$CustomerCode$salt"
+    
+    # Use SHA256 to create a hash, then take first 16 chars + special chars for complexity
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($combined)
+    $hash = $sha256.ComputeHash($bytes)
+    $hashString = [BitConverter]::ToString($hash) -replace '-', ''
+    
+    # Take first 12 chars + add complexity requirements
+    $password = $hashString.Substring(0, 12) + "Rr1!"
+    
+    return $password
+}
+
+function New-RingServiceAccount {
+    <#
+    .SYNOPSIS
+        Creates the RR_Service local user account for SMB access
+    #>
+    param([string]$CustomerCode)
+    
+    $password = Get-RingServicePassword -CustomerCode $CustomerCode
+    $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+    
+    # Check if user already exists
+    $existingUser = Get-LocalUser -Name $script:ServiceUser -ErrorAction SilentlyContinue
+    
+    if ($existingUser) {
+        # Update password to ensure it matches current CustomerCode
+        try {
+            $existingUser | Set-LocalUser -Password $securePassword
+            Write-Host "[OK] Service account '$script:ServiceUser' password updated" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "[WARN] Could not update service account password: $_" -ForegroundColor Yellow
+        }
+    }
+    else {
+        # Create new user
+        try {
+            New-LocalUser -Name $script:ServiceUser `
+                -Password $securePassword `
+                -Description "VLABS Resilience Ring Service Account" `
+                -PasswordNeverExpires `
+                -UserMayNotChangePassword `
+                -AccountNeverExpires | Out-Null
+            
+            # Disable interactive login (optional security measure)
+            # The account can still be used for SMB access
+            
+            Write-Host "[OK] Service account '$script:ServiceUser' created" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "[ERROR] Could not create service account: $_" -ForegroundColor Red
+            return $false
+        }
+    }
+    
+    return $true
+}
+
+function Connect-RingShare {
+    <#
+    .SYNOPSIS
+        Connects to a remote RR_Backups share using the service account credentials
+    #>
+    param(
+        [string]$TailscaleHostname,
+        [string]$TailscaleIP,
+        [string]$CustomerCode
+    )
+    
+    $password = Get-RingServicePassword -CustomerCode $CustomerCode
+    $sharePath = "\\$TailscaleIP\$script:ShareName"
+    
+    # Remove any existing connection to this share
+    net use $sharePath /delete 2>$null | Out-Null
+    
+    # Connect with credentials
+    $result = net use $sharePath /user:$script:ServiceUser $password 2>&1
+    
+    if ($LASTEXITCODE -eq 0) {
+        return $true
+    }
+    else {
+        return $false
+    }
+}
+
+function Disconnect-RingShare {
+    <#
+    .SYNOPSIS
+        Disconnects from a remote RR_Backups share
+    #>
+    param([string]$TailscaleIP)
+    
+    $sharePath = "\\$TailscaleIP\$script:ShareName"
+    net use $sharePath /delete 2>$null | Out-Null
+}
+
+#endregion
 
 #region Configuration Functions
 
@@ -359,40 +474,53 @@ function Test-PeerSmbShare {
     <#
     .SYNOPSIS
         Tests if the RR_Backups share is accessible on a peer
+        Uses service account credentials for authentication
     #>
     param([string]$TailscaleIP)
     
-    $sharePath = "\\$TailscaleIP\$script:ShareName"
+    $config = Get-RingConfig
+    if (-not $config -or -not $config.CustomerCode) {
+        return $false
+    }
     
-    try {
-        # Use a job with timeout to prevent hanging
-        $job = Start-Job -ScriptBlock {
-            param($path)
-            Test-Path $path
-        } -ArgumentList $sharePath
+    # Try to connect with service account credentials
+    $connected = Connect-RingShare -TailscaleIP $TailscaleIP -CustomerCode $config.CustomerCode
+    
+    if ($connected) {
+        $sharePath = "\\$TailscaleIP\$script:ShareName"
         
-        $completed = Wait-Job $job -Timeout 3
-        
-        if ($completed) {
-            $result = Receive-Job $job
-            Remove-Job $job -Force
-            return $result -eq $true
+        try {
+            $job = Start-Job -ScriptBlock {
+                param($path)
+                Test-Path $path
+            } -ArgumentList $sharePath
+            
+            $completed = Wait-Job $job -Timeout 3
+            
+            if ($completed) {
+                $result = Receive-Job $job
+                Remove-Job $job -Force
+                return $result -eq $true
+            }
+            else {
+                Stop-Job $job
+                Remove-Job $job -Force
+                return $false
+            }
         }
-        else {
-            Stop-Job $job
-            Remove-Job $job -Force
+        catch {
             return $false
         }
     }
-    catch {
-        return $false
-    }
+    
+    return $false
 }
 
 function Get-PeerInfo {
     <#
     .SYNOPSIS
         Reads peer-info.json from a peer's RR_Backups share
+        Assumes connection already established via Connect-RingShare
     #>
     param([string]$TailscaleIP)
     
@@ -581,8 +709,20 @@ function Add-StoragePeer {
     
     Write-Host ""
     
-    # Step 6: Create SMB Share
-    Write-Host "STEP 6: Creating SMB Share" -ForegroundColor Yellow
+    # Step 6: Create Service Account
+    Write-Host "STEP 6: Creating Service Account" -ForegroundColor Yellow
+    Write-Host "---------------------------------" -ForegroundColor Yellow
+    
+    if (-not (New-RingServiceAccount -CustomerCode $codename)) {
+        Write-Host "[ERROR] Failed to create service account" -ForegroundColor Red
+        Read-Host "`nPress Enter to return"
+        return
+    }
+    
+    Write-Host ""
+    
+    # Step 7: Create SMB Share with proper permissions
+    Write-Host "STEP 7: Creating SMB Share" -ForegroundColor Yellow
     Write-Host "---------------------------" -ForegroundColor Yellow
     
     $existingShare = Get-SmbShare -Name $script:ShareName -ErrorAction SilentlyContinue
@@ -600,12 +740,25 @@ function Add-StoragePeer {
                 $existingShare = $null
             }
         }
+        else {
+            # Update permissions on existing share
+            try {
+                # Revoke all existing permissions and set new ones
+                Revoke-SmbShareAccess -Name $script:ShareName -AccountName "Everyone" -Force -ErrorAction SilentlyContinue
+                Grant-SmbShareAccess -Name $script:ShareName -AccountName $script:ServiceUser -AccessRight Full -Force | Out-Null
+                Write-Host "[OK] Updated share permissions for '$script:ServiceUser'" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "[WARN] Could not update share permissions: $_" -ForegroundColor Yellow
+            }
+        }
     }
     
     if (-not $existingShare) {
         try {
-            New-SmbShare -Name $script:ShareName -Path $storagePath -FullAccess "Everyone" -Description "VLABS Resilience Ring Storage" | Out-Null
-            Write-Host "[OK] Created network share: \\$($env:COMPUTERNAME)\$script:ShareName" -ForegroundColor Green
+            # Create share with RR_Service having full access
+            New-SmbShare -Name $script:ShareName -Path $storagePath -FullAccess $script:ServiceUser -Description "VLABS Resilience Ring Storage" | Out-Null
+            Write-Host "[OK] Created network share with service account access" -ForegroundColor Green
         }
         catch {
             Write-Host "[ERROR] Could not create SMB share: $_" -ForegroundColor Red
@@ -614,19 +767,45 @@ function Add-StoragePeer {
             return
         }
     }
-    else {
-        Write-Host "[OK] Network share exists: \\$($env:COMPUTERNAME)\$script:ShareName" -ForegroundColor Green
+    
+    # Also set NTFS permissions on the folder
+    try {
+        $acl = Get-Acl $storagePath
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $script:ServiceUser, 
+            "FullControl", 
+            "ContainerInherit,ObjectInherit", 
+            "None", 
+            "Allow"
+        )
+        $acl.AddAccessRule($rule)
+        Set-Acl $storagePath $acl
+        Write-Host "[OK] Set NTFS permissions for '$script:ServiceUser'" -ForegroundColor Green
     }
+    catch {
+        Write-Host "[WARN] Could not set NTFS permissions: $_" -ForegroundColor Yellow
+    }
+    
+    # Get Tailscale hostname for display
+    $tailscaleHostname = $tsStatus.Self.DNSName -replace '\..*$', ''  # Get just the hostname part
+    if (-not $tailscaleHostname) { $tailscaleHostname = $tsStatus.Self.HostName }
+    
+    Write-Host "[OK] Share accessible at: \\$tailscaleHostname\$script:ShareName" -ForegroundColor Green
     
     Write-Host ""
     
-    # Step 7: Save Configuration
-    Write-Host "STEP 7: Saving Configuration" -ForegroundColor Yellow
+    # Step 8: Save Configuration
+    Write-Host "STEP 8: Saving Configuration" -ForegroundColor Yellow
     Write-Host "-----------------------------" -ForegroundColor Yellow
+    
+    # Get Tailscale hostname (the one Tailscale uses, not Windows hostname)
+    $tailscaleHostname = $tsStatus.Self.DNSName -replace '\..*$', ''  # Get just the hostname part
+    if (-not $tailscaleHostname) { $tailscaleHostname = $tsStatus.Self.HostName }
     
     $config = @{
         IsStoragePeer = $true
-        Hostname = $tsStatus.Self.HostName
+        Hostname = $tailscaleHostname
+        WindowsHostname = $env:COMPUTERNAME
         TailscaleIP = $tsStatus.Self.TailscaleIPs[0]
         CustomerCode = $codename
         TailscaleTag = $tailscaleTag
@@ -644,18 +823,19 @@ function Add-StoragePeer {
     $peerInfo = @{
         CustomerCode = $codename
         TailscaleTag = $tailscaleTag
-        Hostname = $tsStatus.Self.HostName
+        Hostname = $tailscaleHostname
+        WindowsHostname = $env:COMPUTERNAME
         TailscaleIP = $tsStatus.Self.TailscaleIPs[0]
         QuotaGB = $quotaGB
         Since = (Get-Date).ToString('o')
-        Version = "1.4"
+        Version = "1.5"
     }
     $peerInfo | ConvertTo-Json | Set-Content $peerInfoPath -Force
     Write-Host "[OK] Peer info file created" -ForegroundColor Green
     
     # Register this peer in the storage peers list
     $thisPeer = [PSCustomObject]@{
-        Hostname = $tsStatus.Self.HostName
+        Hostname = $tailscaleHostname
         TailscaleIP = $tsStatus.Self.TailscaleIPs[0]
         CustomerCode = $codename
         AddedAt = (Get-Date).ToString('o')
@@ -671,19 +851,23 @@ function Add-StoragePeer {
     Write-Host "========================================" -ForegroundColor Green
     Write-Host ""
     Write-Host "Summary:" -ForegroundColor Cyan
-    Write-Host "  Hostname:      $($config.Hostname)" -ForegroundColor White
-    Write-Host "  Tailscale IP:  $($config.TailscaleIP)" -ForegroundColor White
-    Write-Host "  Customer:      $($config.CustomerCode)" -ForegroundColor White
-    Write-Host "  Tailscale Tag: $($config.TailscaleTag)" -ForegroundColor White
-    Write-Host "  Storage:       $($config.StoragePath)" -ForegroundColor White
-    Write-Host "  Share:         \\$($env:COMPUTERNAME)\$script:ShareName" -ForegroundColor White
-    Write-Host "  Quota:         $($config.QuotaGB) GB" -ForegroundColor White
+    Write-Host "  Tailscale Name: $tailscaleHostname" -ForegroundColor White
+    Write-Host "  Tailscale IP:   $($config.TailscaleIP)" -ForegroundColor White
+    Write-Host "  Customer:       $($config.CustomerCode)" -ForegroundColor White
+    Write-Host "  Tailscale Tag:  $($config.TailscaleTag)" -ForegroundColor White
+    Write-Host "  Storage:        $($config.StoragePath)" -ForegroundColor White
+    Write-Host "  Share:          \\$tailscaleHostname\$script:ShareName" -ForegroundColor White
+    Write-Host "  Quota:          $($config.QuotaGB) GB" -ForegroundColor White
+    Write-Host "  Service User:   $script:ServiceUser" -ForegroundColor White
     Write-Host ""
     Write-Host "This machine is now part of the Resilience Ring!" -ForegroundColor Yellow
     Write-Host "Other peers can discover it using 'Discover & Update' (D)." -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "IMPORTANT: Make sure this machine has the Tailscale tag" -ForegroundColor Cyan
-    Write-Host "           '$tailscaleTag' in your Tailscale ACL." -ForegroundColor Cyan
+    Write-Host "IMPORTANT:" -ForegroundColor Cyan
+    Write-Host "  1. Make sure this machine has the Tailscale tag '$tailscaleTag'" -ForegroundColor White
+    Write-Host "     in your Tailscale admin console: https://login.tailscale.com/admin/machines" -ForegroundColor Gray
+    Write-Host "  2. Run 'Add Storage Peer' (P) on other machines with the SAME" -ForegroundColor White
+    Write-Host "     Customer Code '$codename' to join this ring." -ForegroundColor Gray
     
     Read-Host "`nPress Enter to continue"
 }
@@ -890,11 +1074,21 @@ function Update-PeerList {
             continue
         }
         
-        # Test SMB share
-        $shareOk = Test-PeerSmbShare -TailscaleIP $peer.TailscaleIP
-        if (-not $shareOk) {
+        # Connect with service account credentials
+        $connected = Connect-RingShare -TailscaleIP $peer.TailscaleIP -CustomerCode $config.CustomerCode
+        if (-not $connected) {
+            Write-Host " [AUTH FAILED]" -ForegroundColor Yellow
+            $skippedPeers += @{ Hostname = $peer.HostName; Reason = "SMB authentication failed" }
+            continue
+        }
+        
+        # Test SMB share access
+        $sharePath = "\\$($peer.TailscaleIP)\$script:ShareName"
+        $shareExists = Test-Path $sharePath -ErrorAction SilentlyContinue
+        if (-not $shareExists) {
             Write-Host " [NO SHARE]" -ForegroundColor Yellow
             $skippedPeers += @{ Hostname = $peer.HostName; Reason = "RR_Backups share not found" }
+            Disconnect-RingShare -TailscaleIP $peer.TailscaleIP
             continue
         }
         
@@ -903,6 +1097,7 @@ function Update-PeerList {
         if (-not $peerInfo) {
             Write-Host " [NO INFO]" -ForegroundColor Yellow
             $skippedPeers += @{ Hostname = $peer.HostName; Reason = "peer-info.json not found" }
+            Disconnect-RingShare -TailscaleIP $peer.TailscaleIP
             continue
         }
         
@@ -910,18 +1105,25 @@ function Update-PeerList {
         if ($peerInfo.CustomerCode -ne $config.CustomerCode) {
             Write-Host " [CODENAME MISMATCH]" -ForegroundColor Yellow
             $skippedPeers += @{ Hostname = $peer.HostName; Reason = "Different customer code: $($peerInfo.CustomerCode)" }
+            Disconnect-RingShare -TailscaleIP $peer.TailscaleIP
             continue
         }
         
         Write-Host " [OK - $($pingResult.PingMs)ms]" -ForegroundColor Green
         
+        # Use Tailscale hostname from peer-info if available, otherwise from Tailscale status
+        $peerHostname = if ($peerInfo.Hostname) { $peerInfo.Hostname } else { $peer.HostName }
+        
         $discoveredPeers += [PSCustomObject]@{
-            Hostname = $peer.HostName
+            Hostname = $peerHostname
             TailscaleIP = $peer.TailscaleIP
             CustomerCode = $peerInfo.CustomerCode
             AddedAt = (Get-Date).ToString('o')
             QuotaGB = $peerInfo.QuotaGB
         }
+        
+        # Disconnect after reading info
+        Disconnect-RingShare -TailscaleIP $peer.TailscaleIP
     }
     
     Write-Host ""
