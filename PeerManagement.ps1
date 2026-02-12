@@ -31,11 +31,23 @@ function Get-RRPeersFile { return "C:\VLABS_ResilienceRing\storage-peers.json" }
 function Get-RRShareName { return "RR_Backups" }
 function Get-RRServiceUser { return "RR_Service" }
 
+# Debug log function
+function Write-RRDebug {
+    param([string]$Message)
+    $logFile = "C:\VLABS_ResilienceRing\debug.log"
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp | $Message" | Add-Content -Path $logFile -ErrorAction SilentlyContinue
+}
+
 # Ensure base data path exists
 $dataPath = Get-RRDataPath
 if (-not (Test-Path $dataPath)) {
     New-Item -Path $dataPath -ItemType Directory -Force | Out-Null
 }
+
+Write-RRDebug "=== PeerManagement.ps1 loaded ==="
+Write-RRDebug "DataPath: $dataPath"
+Write-RRDebug "ConfigFile exists: $(Test-Path (Get-RRConfigFile))"
 
 #region Health Check and Migration
 
@@ -77,29 +89,49 @@ function Invoke-RingMigration {
     <#
     .SYNOPSIS
         Migrates data from old locations to canonical path
+        Only copies if destination doesn't already exist
     #>
+    # HARDCODED paths
+    $configFile = "C:\VLABS_ResilienceRing\ring-config.json"
+    $peersFile = "C:\VLABS_ResilienceRing\storage-peers.json"
+    
     $legacyPaths = @(
         "C:\VLABS_SecureBackups"
     )
     
+    Write-RRDebug "Invoke-RingMigration called"
+    Write-RRDebug "  Config exists at target: $(Test-Path $configFile)"
+    
     $migrated = $false
     
     foreach ($legacyPath in $legacyPaths) {
-        if (-not (Test-Path $legacyPath)) { continue }
+        if (-not (Test-Path $legacyPath)) { 
+            Write-RRDebug "  Legacy path not found: $legacyPath"
+            continue 
+        }
+        
+        Write-RRDebug "  Checking legacy path: $legacyPath"
         
         # Check for ring-config.json in legacy path
         $legacyConfig = Join-Path $legacyPath "ring-config.json"
-        if ((Test-Path $legacyConfig) -and -not (Test-Path $(Get-RRConfigFile))) {
-            Copy-Item -Path $legacyConfig -Destination $(Get-RRConfigFile) -Force
+        $targetConfigExists = Test-Path $configFile
+        $legacyConfigExists = Test-Path $legacyConfig
+        
+        Write-RRDebug "    Legacy config exists: $legacyConfigExists, Target exists: $targetConfigExists"
+        
+        if ($legacyConfigExists -and -not $targetConfigExists) {
+            Copy-Item -Path $legacyConfig -Destination $configFile -Force
             Write-Host "[MIGRATED] ring-config.json" -ForegroundColor Yellow
+            Write-RRDebug "    MIGRATED ring-config.json"
             $migrated = $true
         }
         
         # Check for storage-peers.json in legacy path
         $legacyPeers = Join-Path $legacyPath "storage-peers.json"
-        if ((Test-Path $legacyPeers) -and -not (Test-Path $(Get-RRPeersFile))) {
-            Copy-Item -Path $legacyPeers -Destination $(Get-RRPeersFile) -Force
+        if ((Test-Path $legacyPeers) -and -not (Test-Path $peersFile)) {
+            Copy-Item -Path $legacyPeers -Destination $peersFile -Force
             Write-Host "[MIGRATED] storage-peers.json" -ForegroundColor Yellow
+            Write-RRDebug "    MIGRATED storage-peers.json"
             $migrated = $true
         }
     }
@@ -107,7 +139,7 @@ function Invoke-RingMigration {
     return $migrated
 }
 
-# Run migration on module load
+# Run migration on module load (only migrates if target doesn't exist)
 Invoke-RingMigration | Out-Null
 
 #endregion
@@ -233,26 +265,36 @@ function Get-RingConfig {
     .SYNOPSIS
         Gets the local ring configuration
     #>
-    $configFile = Get-RRConfigFile
+    # HARDCODED path to avoid any variable issues
+    $configFile = "C:\VLABS_ResilienceRing\ring-config.json"
+    
+    Write-RRDebug "Get-RingConfig called"
+    Write-RRDebug "  Looking for: $configFile"
+    Write-RRDebug "  File exists: $(Test-Path $configFile)"
     
     if (Test-Path $configFile) {
         try {
             $content = Get-Content -Path $configFile -Raw -ErrorAction Stop
+            Write-RRDebug "  Content length: $($content.Length) chars"
+            
             if ([string]::IsNullOrWhiteSpace($content)) {
                 Write-Host "[WARN] Config file exists but is empty: $configFile" -ForegroundColor Yellow
+                Write-RRDebug "  WARN: File is empty!"
                 return $null
             }
-            return $content | ConvertFrom-Json
+            
+            $config = $content | ConvertFrom-Json
+            Write-RRDebug "  Loaded CustomerCode: $($config.CustomerCode)"
+            return $config
         }
         catch {
             Write-Host "[ERROR] Failed to read ring config: $_" -ForegroundColor Red
-            Write-Host "[ERROR] File: $configFile" -ForegroundColor Red
+            Write-RRDebug "  EXCEPTION: $_"
             return $null
         }
     }
     else {
-        # Uncomment for debugging
-        # Write-Host "[DEBUG] Config not found: $configFile" -ForegroundColor DarkGray
+        Write-RRDebug "  File not found!"
     }
     return $null
 }
@@ -264,27 +306,42 @@ function Save-RingConfig {
     #>
     param([hashtable]$Config)
     
-    $configFile = Get-RRConfigFile
-    $dataPath = Get-RRDataPath
+    # HARDCODED path to avoid any variable issues
+    $configFile = "C:\VLABS_ResilienceRing\ring-config.json"
+    $dataPath = "C:\VLABS_ResilienceRing"
+    
+    Write-RRDebug "Save-RingConfig called"
+    Write-RRDebug "  Target file: $configFile"
+    Write-RRDebug "  Config keys: $($Config.Keys -join ', ')"
     
     # Ensure directory exists
     if (-not (Test-Path $dataPath)) {
         New-Item -Path $dataPath -ItemType Directory -Force | Out-Null
+        Write-RRDebug "  Created directory: $dataPath"
     }
     
     try {
         $json = $Config | ConvertTo-Json -Depth 10
-        $json | Set-Content -Path $configFile -Force -ErrorAction Stop
+        Write-RRDebug "  JSON length: $($json.Length) chars"
+        
+        # Write using Out-File for more reliable behavior
+        $json | Out-File -FilePath $configFile -Encoding UTF8 -Force -ErrorAction Stop
         
         # Verify write was successful
         if (Test-Path $configFile) {
             $size = (Get-Item $configFile).Length
             Write-Host "[OK] Config saved ($size bytes): $configFile" -ForegroundColor Green
+            Write-RRDebug "  SUCCESS: File saved, $size bytes"
+        }
+        else {
+            Write-Host "[ERROR] File not created!" -ForegroundColor Red
+            Write-RRDebug "  ERROR: File does not exist after write!"
         }
     }
     catch {
         Write-Host "[ERROR] Failed to save config: $_" -ForegroundColor Red
         Write-Host "[ERROR] Path: $configFile" -ForegroundColor Red
+        Write-RRDebug "  EXCEPTION: $_"
     }
 }
 
