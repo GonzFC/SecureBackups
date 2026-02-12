@@ -11,8 +11,9 @@
     Requires: Administrator privileges
 #>
 
-# Configuration
-$script:ConfigPath = "C:\VLABS_SecureBackups"
+# Configuration - Canonical path for all data
+$script:ConfigPath = "C:\VLABS_ResilienceRing"
+$script:LegacyConfigPath = "C:\VLABS_SecureBackups"
 $script:DestinationsFile = Join-Path $ConfigPath "destinations.json"
 $script:JobsFile = Join-Path $ConfigPath "jobs.json"
 $script:LogPath = Join-Path $ConfigPath "Logs"
@@ -46,6 +47,40 @@ function Initialize-Environment {
         if (-not (Test-Path $LogPath)) {
             New-Item -Path $LogPath -ItemType Directory -Force | Out-Null
             Write-Log "Created logs directory: $LogPath"
+        }
+
+        # Migrate from legacy path (C:\VLABS_SecureBackups) if needed
+        if (Test-Path $LegacyConfigPath) {
+            $filesToMigrate = @('destinations.json', 'jobs.json')
+            $migrated = $false
+            
+            foreach ($file in $filesToMigrate) {
+                $legacyFile = Join-Path $LegacyConfigPath $file
+                $newFile = Join-Path $ConfigPath $file
+                
+                if ((Test-Path $legacyFile) -and -not (Test-Path $newFile)) {
+                    Copy-Item -Path $legacyFile -Destination $newFile -Force
+                    Write-Log "Migrated $file from legacy path" -Level INFO
+                    $migrated = $true
+                }
+            }
+            
+            # Migrate logs folder
+            $legacyLogs = Join-Path $LegacyConfigPath "Logs"
+            if ((Test-Path $legacyLogs) -and (Get-ChildItem $legacyLogs -ErrorAction SilentlyContinue)) {
+                Get-ChildItem $legacyLogs -File | ForEach-Object {
+                    $destFile = Join-Path $LogPath $_.Name
+                    if (-not (Test-Path $destFile)) {
+                        Copy-Item -Path $_.FullName -Destination $destFile -Force
+                    }
+                }
+                Write-Log "Migrated log files from legacy path" -Level INFO
+                $migrated = $true
+            }
+            
+            if ($migrated) {
+                Write-Host "[OK] Migrated data from legacy path" -ForegroundColor Green
+            }
         }
 
         # Initialize JSON files if they don't exist

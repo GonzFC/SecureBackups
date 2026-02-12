@@ -29,6 +29,81 @@ if (-not (Test-Path $script:BaseDataPath)) {
     New-Item -Path $script:BaseDataPath -ItemType Directory -Force | Out-Null
 }
 
+#region Health Check and Migration
+
+function Test-RingHealth {
+    <#
+    .SYNOPSIS
+        Verifies ring configuration is valid and files are in expected locations
+    #>
+    $issues = @()
+    
+    # Check base directory exists
+    if (-not (Test-Path $script:BaseDataPath)) {
+        $issues += "Base directory missing: $script:BaseDataPath"
+    }
+    
+    # Check ring-config.json
+    if (Test-Path $script:ConfigFile) {
+        try {
+            $config = Get-Content $script:ConfigFile -Raw | ConvertFrom-Json
+            if (-not $config.CustomerCode) {
+                $issues += "ring-config.json exists but CustomerCode is empty"
+            }
+        }
+        catch {
+            $issues += "ring-config.json is corrupted: $_"
+        }
+    }
+    
+    return @{
+        IsHealthy = ($issues.Count -eq 0)
+        Issues = $issues
+        ConfigExists = (Test-Path $script:ConfigFile)
+        PeersExists = (Test-Path $script:StoragePeersFile)
+        ConfigPath = $script:ConfigFile
+    }
+}
+
+function Invoke-RingMigration {
+    <#
+    .SYNOPSIS
+        Migrates data from old locations to canonical path
+    #>
+    $legacyPaths = @(
+        "C:\VLABS_SecureBackups"
+    )
+    
+    $migrated = $false
+    
+    foreach ($legacyPath in $legacyPaths) {
+        if (-not (Test-Path $legacyPath)) { continue }
+        
+        # Check for ring-config.json in legacy path
+        $legacyConfig = Join-Path $legacyPath "ring-config.json"
+        if ((Test-Path $legacyConfig) -and -not (Test-Path $script:ConfigFile)) {
+            Copy-Item -Path $legacyConfig -Destination $script:ConfigFile -Force
+            Write-Host "[MIGRATED] ring-config.json" -ForegroundColor Yellow
+            $migrated = $true
+        }
+        
+        # Check for storage-peers.json in legacy path
+        $legacyPeers = Join-Path $legacyPath "storage-peers.json"
+        if ((Test-Path $legacyPeers) -and -not (Test-Path $script:StoragePeersFile)) {
+            Copy-Item -Path $legacyPeers -Destination $script:StoragePeersFile -Force
+            Write-Host "[MIGRATED] storage-peers.json" -ForegroundColor Yellow
+            $migrated = $true
+        }
+    }
+    
+    return $migrated
+}
+
+# Run migration on module load
+Invoke-RingMigration | Out-Null
+
+#endregion
+
 #region Service Account Functions
 
 function Get-RingServicePassword {
@@ -150,8 +225,21 @@ function Get-RingConfig {
     .SYNOPSIS
         Gets the local ring configuration
     #>
+    # Debug: Show which file we're checking
+    # Write-Host "[DEBUG] Looking for config at: $script:ConfigFile" -ForegroundColor DarkGray
+    
     if (Test-Path $script:ConfigFile) {
-        return Get-Content $script:ConfigFile -Raw | ConvertFrom-Json
+        try {
+            $content = Get-Content $script:ConfigFile -Raw -ErrorAction Stop
+            if ([string]::IsNullOrWhiteSpace($content)) {
+                return $null
+            }
+            return $content | ConvertFrom-Json
+        }
+        catch {
+            Write-Host "[ERROR] Failed to read ring config: $_" -ForegroundColor Red
+            return $null
+        }
     }
     return $null
 }
@@ -1344,9 +1432,18 @@ function Invoke-StartupDiscovery {
     .SYNOPSIS
         Runs discovery at startup with a simple progress indicator
     #>
+    
+    # Check health first
+    $health = Test-RingHealth
+    
+    if (-not $health.ConfigExists) {
+        Write-Host "[INFO] Ring not configured - run 'Add Storage Peer' (P) to set up" -ForegroundColor Yellow
+        return
+    }
+    
     $config = Get-RingConfig
     if (-not $config -or -not $config.CustomerCode) {
-        Write-Host "[SKIP] Not configured as storage peer" -ForegroundColor Yellow
+        Write-Host "[WARN] Config file exists but is invalid - run P to reconfigure" -ForegroundColor Yellow
         return
     }
     

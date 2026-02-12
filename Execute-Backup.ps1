@@ -14,7 +14,7 @@ param(
 )
 
 # Configuration
-$script:ConfigPath = "C:\VLABS_SecureBackups"
+$script:ConfigPath = "C:\VLABS_ResilienceRing"
 $script:JobsFile = Join-Path $ConfigPath "jobs.json"
 $script:LogPath = Join-Path $ConfigPath "Logs"
 

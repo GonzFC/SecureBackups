@@ -27,18 +27,19 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.6.0'
+$script:AppVersion = '1.6.1'
 $script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
 $script:RepoBranch = 'main'
 
-# Paths - use installation directory, not legacy path
+# Paths - Canonical data path for all configuration
 $script:InstallPath = $PSScriptRoot
-$script:ConfigPath = $PSScriptRoot
-$script:DestinationsFile = Join-Path $ConfigPath "destinations.json"
-$script:JobsFile = Join-Path $ConfigPath "jobs.json"
-$script:LogPath = Join-Path $ConfigPath "Logs"
+$script:DataPath = "C:\VLABS_ResilienceRing"
+$script:ConfigPath = $script:DataPath  # For compatibility with VLABS-SecureBackup.ps1
+$script:DestinationsFile = Join-Path $DataPath "destinations.json"
+$script:JobsFile = Join-Path $DataPath "jobs.json"
+$script:LogPath = Join-Path $DataPath "Logs"
 $script:ExecutionScript = Join-Path $PSScriptRoot "Execute-Backup.ps1"
 
 #region Update Management
