@@ -25,7 +25,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.0.1'
+$script:AppVersion = '1.0.2'
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -324,8 +324,10 @@ function Get-PeerData {
         Write-Log "Error getting peer data from $TailscaleIP : $_" -Level ERROR
     }
     finally {
-        # Disconnect
-        net use $sharePath /delete 2>$null | Out-Null
+        # Disconnect (only if we connected)
+        if ($result.Connected) {
+            try { net use $sharePath /delete 2>&1 | Out-Null } catch { }
+        }
     }
     
     return $result
