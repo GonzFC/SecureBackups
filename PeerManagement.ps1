@@ -325,14 +325,24 @@ function Test-PeerPing {
     <#
     .SYNOPSIS
         Tests ping connectivity to a peer (2 attempts)
+        Compatible with PowerShell 5.1 and 7+
     #>
     param([string]$TailscaleIP)
     
     for ($attempt = 1; $attempt -le 2; $attempt++) {
         try {
-            $ping = Test-Connection -ComputerName $TailscaleIP -Count 1 -TimeoutSeconds 2 -ErrorAction Stop
-            $avgMs = [math]::Round($ping.ResponseTime, 1)
-            return @{ Success = $true; PingMs = $avgMs }
+            # Use .NET Ping for consistent behavior across PowerShell versions
+            $pinger = New-Object System.Net.NetworkInformation.Ping
+            $result = $pinger.Send($TailscaleIP, 2000)  # 2 second timeout
+            
+            if ($result.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                return @{ Success = $true; PingMs = $result.RoundtripTime }
+            }
+            
+            if ($attempt -eq 2) {
+                return @{ Success = $false; PingMs = -1 }
+            }
+            Start-Sleep -Milliseconds 500
         }
         catch {
             if ($attempt -eq 2) {
@@ -341,6 +351,8 @@ function Test-PeerPing {
             Start-Sleep -Milliseconds 500
         }
     }
+    
+    return @{ Success = $false; PingMs = -1 }
 }
 
 function Test-PeerSmbShare {
