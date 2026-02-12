@@ -272,8 +272,8 @@ function Connect-ToPeer {
     
     $sharePath = "\\$TailscaleIP\RR_Backups"
     
-    # Check if already connected
-    $existing = net use 2>$null | Select-String $sharePath
+    # Check if already connected (use -SimpleMatch to avoid regex issues with backslashes)
+    $existing = net use 2>$null | Select-String -SimpleMatch $sharePath
     if ($existing) { return $true }
     
     # Get service account password

@@ -27,7 +27,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.8.3'
+$script:AppVersion = '1.8.4'
 $script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
