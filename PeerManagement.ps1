@@ -13,9 +13,130 @@
 #>
 
 # Paths
-$script:PeersFile = Join-Path $PSScriptRoot "peers.json"
-$script:PeerStatsFile = Join-Path $PSScriptRoot "peer-stats.json"
-$script:ConfigFile = Join-Path $PSScriptRoot "ring-config.json"
+$script:BaseDataPath = "C:\VLABS_ResilienceRing"
+$script:PeersFile = Join-Path $PSScriptRoot "peers.json"  # Local tailscale peers cache
+$script:ConfigFile = Join-Path $script:BaseDataPath "ring-config.json"
+
+# Ensure base data path exists
+if (-not (Test-Path $script:BaseDataPath)) {
+    New-Item -Path $script:BaseDataPath -ItemType Directory -Force | Out-Null
+}
+
+function Get-RingDataPath {
+    <#
+    .SYNOPSIS
+        Gets the path for ring data storage for a specific customer code
+    #>
+    param([string]$CustomerCode)
+    
+    $path = Join-Path $script:BaseDataPath "ring-data\$CustomerCode"
+    if (-not (Test-Path $path)) {
+        New-Item -Path $path -ItemType Directory -Force | Out-Null
+    }
+    return $path
+}
+
+function Get-StoragePeersFile {
+    <#
+    .SYNOPSIS
+        Gets the path to the storage peers list for the current customer
+    #>
+    $code = Get-LocalCustomerCode
+    if (-not $code) { return $null }
+    
+    $ringPath = Get-RingDataPath -CustomerCode $code
+    return Join-Path $ringPath "storage-peers.json"
+}
+
+function Save-StoragePeersList {
+    <#
+    .SYNOPSIS
+        Saves the storage peers list locally and to the shared storage for replication
+    #>
+    param([array]$Peers)
+    
+    $code = Get-LocalCustomerCode
+    if (-not $code) { return }
+    
+    $peerData = @{
+        CustomerCode = $code
+        LastUpdated = (Get-Date).ToString('o')
+        UpdatedBy = $env:COMPUTERNAME
+        Peers = $Peers
+    }
+    
+    # Save locally
+    $localFile = Get-StoragePeersFile
+    if ($localFile) {
+        $peerData | ConvertTo-Json -Depth 10 | Set-Content $localFile -Force
+    }
+    
+    # Also save to our shared storage for other peers to read
+    $config = Get-Content $script:ConfigFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+    if ($config -and $config.StoragePath) {
+        $sharedRingPath = Join-Path $config.StoragePath "ring-data\$code"
+        if (-not (Test-Path $sharedRingPath)) {
+            New-Item -Path $sharedRingPath -ItemType Directory -Force | Out-Null
+        }
+        $sharedFile = Join-Path $sharedRingPath "storage-peers.json"
+        $peerData | ConvertTo-Json -Depth 10 | Set-Content $sharedFile -Force
+    }
+}
+
+function Sync-StoragePeersList {
+    <#
+    .SYNOPSIS
+        Syncs the storage peers list from all known peers, merging into a master list
+    #>
+    $code = Get-LocalCustomerCode
+    if (-not $code) { return @() }
+    
+    $allPeers = @{}  # Use hashtable to dedupe by TailscaleIP
+    
+    # Load local list first
+    $localFile = Get-StoragePeersFile
+    if ($localFile -and (Test-Path $localFile)) {
+        $localData = Get-Content $localFile -Raw | ConvertFrom-Json
+        foreach ($peer in $localData.Peers) {
+            $allPeers[$peer.TailscaleIP] = $peer
+        }
+    }
+    
+    # Try to read from each known peer's shared storage
+    $tailscalePeers = Get-Content $script:PeersFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+    
+    foreach ($tsPeer in $tailscalePeers) {
+        $remotePath = "\\$($tsPeer.TailscaleIP)\Backups\ring-data\$code\storage-peers.json"
+        
+        try {
+            $job = Start-Job -ScriptBlock {
+                param($path)
+                if (Test-Path $path) { Get-Content $path -Raw }
+            } -ArgumentList $remotePath
+            
+            $completed = Wait-Job $job -Timeout 2
+            if ($completed) {
+                $content = Receive-Job $job
+                if ($content) {
+                    $remoteData = $content | ConvertFrom-Json
+                    foreach ($peer in $remoteData.Peers) {
+                        # Merge: keep the most recent info
+                        if (-not $allPeers.ContainsKey($peer.TailscaleIP) -or 
+                            $peer.LastSeen -gt $allPeers[$peer.TailscaleIP].LastSeen) {
+                            $allPeers[$peer.TailscaleIP] = $peer
+                        }
+                    }
+                }
+            }
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
+        }
+        catch {
+            # Continue on error
+        }
+    }
+    
+    return @($allPeers.Values)
+}
 
 #region Tailscale Functions
 
@@ -210,15 +331,16 @@ function Get-TailscalePeers {
 function Test-PeerConnectivity {
     <#
     .SYNOPSIS
-        Tests connectivity to a peer and returns ping time
+        Tests connectivity to a peer and returns ping time (with timeout)
     #>
     param(
         [string]$TailscaleIP
     )
     
     try {
-        $ping = Test-Connection -ComputerName $TailscaleIP -Count 3 -ErrorAction Stop
-        $avgMs = [math]::Round(($ping | Measure-Object -Property ResponseTime -Average).Average, 1)
+        # Use single ping with short timeout
+        $ping = Test-Connection -ComputerName $TailscaleIP -Count 1 -TimeoutSeconds 2 -ErrorAction Stop
+        $avgMs = [math]::Round($ping.ResponseTime, 1)
         return @{ Success = $true; PingMs = $avgMs }
     }
     catch {
@@ -427,6 +549,12 @@ function Add-StoragePeer {
         New-Item -Path $customerPath -ItemType Directory -Force | Out-Null
     }
     
+    # Create ring-data folder structure in storage
+    $ringDataPath = Join-Path $storagePath "ring-data\$codename"
+    if (-not (Test-Path $ringDataPath)) {
+        New-Item -Path $ringDataPath -ItemType Directory -Force | Out-Null
+    }
+    
     # Create a peer-info file in the storage path for discovery
     $peerInfoPath = Join-Path $storagePath "peer-info.json"
     $peerInfo = @{
@@ -454,6 +582,31 @@ function Add-StoragePeer {
     else {
         Write-Host "[OK] Network share already exists: \\$($env:COMPUTERNAME)\$shareName" -ForegroundColor Green
     }
+    
+    # Register this peer in the storage peers list
+    $thisPeer = [PSCustomObject]@{
+        HostName = $tsStatus.Self.HostName
+        TailscaleIP = $tsStatus.Self.TailscaleIPs[0]
+        CustomerCode = $codename
+        PingMs = 0
+        LastSeen = (Get-Date).ToString('o')
+        Online = $true
+        FreePct = 100
+        JobsHosted = 0
+        QuotaGB = $quotaGB
+    }
+    
+    # Load existing peers and add this one
+    $existingPeers = @()
+    $peersFile = Join-Path $ringDataPath "storage-peers.json"
+    if (Test-Path $peersFile) {
+        $data = Get-Content $peersFile -Raw | ConvertFrom-Json
+        $existingPeers = @($data.Peers | Where-Object { $_.TailscaleIP -ne $thisPeer.TailscaleIP })
+    }
+    $existingPeers += $thisPeer
+    
+    # Save the updated list
+    Save-StoragePeersList -Peers $existingPeers
     
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Green
@@ -491,7 +644,7 @@ function Get-LocalCustomerCode {
 function Get-PeerConfig {
     <#
     .SYNOPSIS
-        Attempts to read peer configuration from remote storage share
+        Attempts to read peer configuration from remote storage share (with timeout)
     #>
     param([string]$TailscaleIP)
     
@@ -499,16 +652,32 @@ function Get-PeerConfig {
     $remotePath = "\\$TailscaleIP\Backups\peer-info.json"
     
     try {
-        if (Test-Path $remotePath -ErrorAction SilentlyContinue) {
-            $peerConfig = Get-Content $remotePath -Raw -ErrorAction Stop | ConvertFrom-Json
-            return $peerConfig
+        # Use a job with timeout to prevent hanging on unreachable shares
+        $job = Start-Job -ScriptBlock {
+            param($path)
+            if (Test-Path $path) {
+                Get-Content $path -Raw | ConvertFrom-Json
+            }
+        } -ArgumentList $remotePath
+        
+        # Wait max 3 seconds
+        $completed = Wait-Job $job -Timeout 3
+        
+        if ($completed) {
+            $result = Receive-Job $job
+            Remove-Job $job -Force
+            return $result
+        }
+        else {
+            Stop-Job $job
+            Remove-Job $job -Force
+            return $null
         }
     }
     catch {
         # Silently fail - peer may not be a storage peer
+        return $null
     }
-    
-    return $null
 }
 
 function Get-StoragePeers {
@@ -516,58 +685,103 @@ function Get-StoragePeers {
     .SYNOPSIS
         Gets all configured storage peers with their current status and scores
         Only returns peers belonging to the same CustomerCode
+        Uses replicated peer list for faster discovery
     #>
+    param(
+        [switch]$ForceRefresh,
+        [switch]$ShowProgress
+    )
     
     # Get our local CustomerCode
     $localCode = Get-LocalCustomerCode
     if (-not $localCode) {
-        Write-Host "[WARN] This machine is not configured as a storage peer." -ForegroundColor Yellow
-        Write-Host "Run 'Add Storage Peer' first to set your customer code." -ForegroundColor Yellow
         return @()
     }
     
-    if (-not (Test-Path $script:PeersFile)) {
-        Update-PeerList | Out-Null
+    # First, try to use the replicated peer list (fast)
+    $knownPeers = Sync-StoragePeersList
+    
+    # If no known peers or force refresh, scan the network
+    if ($knownPeers.Count -eq 0 -or $ForceRefresh) {
+        if (-not (Test-Path $script:PeersFile)) {
+            Update-PeerList | Out-Null
+        }
+        
+        $tailscalePeers = Get-Content $script:PeersFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+        if (-not $tailscalePeers) { $tailscalePeers = @() }
+        
+        $discoveredPeers = @()
+        $total = @($tailscalePeers).Count
+        $current = 0
+        
+        foreach ($peer in $tailscalePeers) {
+            $current++
+            if ($ShowProgress) {
+                Write-Host "." -NoNewline -ForegroundColor Gray
+            }
+            
+            $pingResult = Test-PeerConnectivity -TailscaleIP $peer.TailscaleIP
+            
+            if ($pingResult.Success) {
+                $peerConfig = Get-PeerConfig -TailscaleIP $peer.TailscaleIP
+                
+                if ($peerConfig -and $peerConfig.CustomerCode -eq $localCode) {
+                    $freePct = 50
+                    $jobsHosted = 0
+                    
+                    if ($peerConfig.QuotaGB -and $peerConfig.UsedGB) {
+                        $freePct = [math]::Round((1 - ($peerConfig.UsedGB / $peerConfig.QuotaGB)) * 100, 0)
+                    }
+                    
+                    $discoveredPeers += [PSCustomObject]@{
+                        HostName = $peer.HostName
+                        TailscaleIP = $peer.TailscaleIP
+                        CustomerCode = $peerConfig.CustomerCode
+                        PingMs = $pingResult.PingMs
+                        LastSeen = (Get-Date).ToString('o')
+                        Online = $true
+                        FreePct = $freePct
+                        JobsHosted = $jobsHosted
+                        QuotaGB = $peerConfig.QuotaGB
+                    }
+                }
+            }
+        }
+        
+        if ($ShowProgress) { Write-Host "" }
+        
+        # Save discovered peers to replicated list
+        if ($discoveredPeers.Count -gt 0) {
+            Save-StoragePeersList -Peers $discoveredPeers
+        }
+        
+        $knownPeers = $discoveredPeers
     }
     
-    $peers = Get-Content $script:PeersFile -Raw | ConvertFrom-Json
+    # Calculate scores and check online status for known peers
     $storagePeers = @()
     
-    foreach ($peer in $peers) {
+    foreach ($peer in $knownPeers) {
+        # Quick ping check
         $pingResult = Test-PeerConnectivity -TailscaleIP $peer.TailscaleIP
         
         if ($pingResult.Success) {
-            # Try to get peer's config to check CustomerCode
-            $peerConfig = Get-PeerConfig -TailscaleIP $peer.TailscaleIP
+            $score = Get-PeerScore -PingMs $pingResult.PingMs -FreePct $peer.FreePct -JobsHosted $peer.JobsHosted
             
-            # Only include peers with matching CustomerCode
-            if ($peerConfig -and $peerConfig.CustomerCode -eq $localCode) {
-                # Get storage stats from peer config
-                $freePct = 50  # Default, could calculate from QuotaGB and used space
-                $jobsHosted = 0
-                
-                if ($peerConfig.QuotaGB -and $peerConfig.UsedGB) {
-                    $freePct = [math]::Round((1 - ($peerConfig.UsedGB / $peerConfig.QuotaGB)) * 100, 0)
-                }
-                
-                $score = Get-PeerScore -PingMs $pingResult.PingMs -FreePct $freePct -JobsHosted $jobsHosted
-                
-                $storagePeers += [PSCustomObject]@{
-                    HostName = $peer.HostName
-                    TailscaleIP = $peer.TailscaleIP
-                    CustomerCode = $peerConfig.CustomerCode
-                    PingMs = $pingResult.PingMs
-                    Score = $score
-                    Online = $true
-                    FreePct = $freePct
-                    JobsHosted = $jobsHosted
-                    QuotaGB = $peerConfig.QuotaGB
-                }
+            $storagePeers += [PSCustomObject]@{
+                HostName = $peer.HostName
+                TailscaleIP = $peer.TailscaleIP
+                CustomerCode = $peer.CustomerCode
+                PingMs = $pingResult.PingMs
+                Score = $score
+                Online = $true
+                FreePct = $peer.FreePct
+                JobsHosted = $peer.JobsHosted
+                QuotaGB = $peer.QuotaGB
             }
         }
     }
     
-    # Sort by score descending
     return $storagePeers | Sort-Object -Property Score -Descending
 }
 
@@ -636,8 +850,8 @@ function Show-StoragePeers {
     }
     
     Write-Host "Customer: $localCode" -ForegroundColor Cyan
-    Write-Host "Scanning..." -ForegroundColor Gray
-    $peers = Get-StoragePeers
+    Write-Host "Checking storage nodes" -ForegroundColor Gray -NoNewline
+    $peers = Get-StoragePeers -ShowProgress
     
     if ($peers.Count -eq 0) {
         Write-Host "`nNo storage nodes found for customer '$localCode'." -ForegroundColor Yellow
