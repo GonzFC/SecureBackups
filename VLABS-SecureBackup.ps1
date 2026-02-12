@@ -646,7 +646,7 @@ function New-BackupDestination {
     }
     
     Write-Host ""
-    Write-Host "  #  | Ping   | Location             | Hostname" -ForegroundColor Gray
+    Write-Host "  #  | Ping   | Location             | Tailscale Name" -ForegroundColor Gray
     Write-Host " ----|--------|----------------------|--------------------" -ForegroundColor Gray
     
     for ($i = 0; $i -lt $availablePeers.Count; $i++) {
@@ -654,10 +654,11 @@ function New-BackupDestination {
         $pingColor = if ($peer.PingMs -lt 50) { 'Green' } elseif ($peer.PingMs -lt 100) { 'Yellow' } else { 'Red' }
         $locationStr = if ($peer.Location) { $peer.Location } else { "N/A" }
         if ($locationStr.Length -gt 20) { $locationStr = $locationStr.Substring(0, 17) + "..." }
+        $hostStr = if ($peer.Hostname) { $peer.Hostname } else { "Unknown" }
         
         Write-Host (" {0,2} |" -f ($i + 1)) -NoNewline
         Write-Host (" {0,5}ms" -f $peer.PingMs) -ForegroundColor $pingColor -NoNewline
-        Write-Host (" | {0,-20} | {1}" -f $locationStr, $peer.Hostname)
+        Write-Host (" | {0,-20} | {1}" -f $locationStr, $hostStr)
     }
     
     Write-Host ""
@@ -741,7 +742,7 @@ function New-BackupDestination {
         Write-Host "  Type:        $backupType" -ForegroundColor White
         Write-Host "  Source:      $backupObject" -ForegroundColor White
         Write-Host "  Destination: $destPath" -ForegroundColor White
-        Write-Host "  Peer:        $($selectedPeer.Hostname) ($($selectedPeer.Location))" -ForegroundColor White
+        Write-Host "  Storage Peer: $($selectedPeer.Hostname) @ $($selectedPeer.Location)" -ForegroundColor White
         Write-Host ""
         Write-Log "Created destination: $shortName -> $destPath" -Level SUCCESS
     }

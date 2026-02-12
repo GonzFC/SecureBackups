@@ -1188,7 +1188,7 @@ function Show-StoragePeers {
     if ($availablePeers.Count -gt 0) {
         Write-Host ""
         Write-Host " AVAILABLE ($($availablePeers.Count)):" -ForegroundColor Green
-        Write-Host "  #  | Ping   | Location             | Hostname           | Tailscale IP" -ForegroundColor Gray
+        Write-Host "  #  | Ping   | Location             | Tailscale Name     | IP Address" -ForegroundColor Gray
         Write-Host " ----|--------|----------------------|--------------------|-----------------" -ForegroundColor Gray
         
         $index = 1
@@ -1196,10 +1196,12 @@ function Show-StoragePeers {
             $pingColor = if ($peer.PingMs -lt 50) { 'Green' } elseif ($peer.PingMs -lt 100) { 'Yellow' } else { 'Red' }
             $locationStr = if ($peer.Location) { $peer.Location } else { "N/A" }
             if ($locationStr.Length -gt 20) { $locationStr = $locationStr.Substring(0, 17) + "..." }
+            $hostStr = if ($peer.Hostname) { $peer.Hostname } else { "Unknown" }
+            if ($hostStr.Length -gt 18) { $hostStr = $hostStr.Substring(0, 15) + "..." }
             
             Write-Host (" {0,2} |" -f $index) -NoNewline
             Write-Host (" {0,5}ms" -f $peer.PingMs) -ForegroundColor $pingColor -NoNewline
-            Write-Host (" | {0,-20} | {1,-18} | {2}" -f $locationStr, $peer.Hostname, $peer.TailscaleIP)
+            Write-Host (" | {0,-20} | {1,-18} | {2}" -f $locationStr, $hostStr, $peer.TailscaleIP)
             
             $index++
         }
@@ -1209,7 +1211,7 @@ function Show-StoragePeers {
         Write-Host ""
         Write-Host " UNAVAILABLE ($($unavailablePeers.Count)):" -ForegroundColor Red
         foreach ($peer in $unavailablePeers) {
-            Write-Host "  - $($peer.Hostname) ($($peer.TailscaleIP)): $($peer.Reason)" -ForegroundColor DarkGray
+            Write-Host "  - $($peer.Hostname) [$($peer.TailscaleIP)]: $($peer.Reason)" -ForegroundColor DarkGray
         }
     }
     
