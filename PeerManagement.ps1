@@ -17,16 +17,24 @@
     Peer list stored in: C:\VLABS_ResilienceRing\storage-peers.json
 #>
 
-# Paths
-$script:BaseDataPath = "C:\VLABS_ResilienceRing"
-$script:ConfigFile = Join-Path $script:BaseDataPath "ring-config.json"
-$script:StoragePeersFile = Join-Path $script:BaseDataPath "storage-peers.json"
-$script:ShareName = "RR_Backups"
-$script:ServiceUser = "RR_Service"
+# Constants - HARDCODED to avoid scope issues when dot-sourced
+$global:RR_DataPath = "C:\VLABS_ResilienceRing"
+$global:RR_ConfigFile = "C:\VLABS_ResilienceRing\ring-config.json"
+$global:RR_PeersFile = "C:\VLABS_ResilienceRing\storage-peers.json"
+$global:RR_ShareName = "RR_Backups"
+$global:RR_ServiceUser = "RR_Service"
+
+# Helper functions to get paths (more reliable than variables)
+function Get-RRDataPath { return "C:\VLABS_ResilienceRing" }
+function Get-RRConfigFile { return "C:\VLABS_ResilienceRing\ring-config.json" }
+function Get-RRPeersFile { return "C:\VLABS_ResilienceRing\storage-peers.json" }
+function Get-RRShareName { return "RR_Backups" }
+function Get-RRServiceUser { return "RR_Service" }
 
 # Ensure base data path exists
-if (-not (Test-Path $script:BaseDataPath)) {
-    New-Item -Path $script:BaseDataPath -ItemType Directory -Force | Out-Null
+$dataPath = Get-RRDataPath
+if (-not (Test-Path $dataPath)) {
+    New-Item -Path $dataPath -ItemType Directory -Force | Out-Null
 }
 
 #region Health Check and Migration
@@ -39,14 +47,14 @@ function Test-RingHealth {
     $issues = @()
     
     # Check base directory exists
-    if (-not (Test-Path $script:BaseDataPath)) {
-        $issues += "Base directory missing: $script:BaseDataPath"
+    if (-not (Test-Path $(Get-RRDataPath))) {
+        $issues += "Base directory missing: $(Get-RRDataPath)"
     }
     
     # Check ring-config.json
-    if (Test-Path $script:ConfigFile) {
+    if (Test-Path $(Get-RRConfigFile)) {
         try {
-            $config = Get-Content $script:ConfigFile -Raw | ConvertFrom-Json
+            $config = Get-Content $(Get-RRConfigFile) -Raw | ConvertFrom-Json
             if (-not $config.CustomerCode) {
                 $issues += "ring-config.json exists but CustomerCode is empty"
             }
@@ -59,9 +67,9 @@ function Test-RingHealth {
     return @{
         IsHealthy = ($issues.Count -eq 0)
         Issues = $issues
-        ConfigExists = (Test-Path $script:ConfigFile)
-        PeersExists = (Test-Path $script:StoragePeersFile)
-        ConfigPath = $script:ConfigFile
+        ConfigExists = (Test-Path $(Get-RRConfigFile))
+        PeersExists = (Test-Path $(Get-RRPeersFile))
+        ConfigPath = $(Get-RRConfigFile)
     }
 }
 
@@ -81,16 +89,16 @@ function Invoke-RingMigration {
         
         # Check for ring-config.json in legacy path
         $legacyConfig = Join-Path $legacyPath "ring-config.json"
-        if ((Test-Path $legacyConfig) -and -not (Test-Path $script:ConfigFile)) {
-            Copy-Item -Path $legacyConfig -Destination $script:ConfigFile -Force
+        if ((Test-Path $legacyConfig) -and -not (Test-Path $(Get-RRConfigFile))) {
+            Copy-Item -Path $legacyConfig -Destination $(Get-RRConfigFile) -Force
             Write-Host "[MIGRATED] ring-config.json" -ForegroundColor Yellow
             $migrated = $true
         }
         
         # Check for storage-peers.json in legacy path
         $legacyPeers = Join-Path $legacyPath "storage-peers.json"
-        if ((Test-Path $legacyPeers) -and -not (Test-Path $script:StoragePeersFile)) {
-            Copy-Item -Path $legacyPeers -Destination $script:StoragePeersFile -Force
+        if ((Test-Path $legacyPeers) -and -not (Test-Path $(Get-RRPeersFile))) {
+            Copy-Item -Path $legacyPeers -Destination $(Get-RRPeersFile) -Force
             Write-Host "[MIGRATED] storage-peers.json" -ForegroundColor Yellow
             $migrated = $true
         }
@@ -141,13 +149,13 @@ function New-RingServiceAccount {
     $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
     
     # Check if user already exists
-    $existingUser = Get-LocalUser -Name $script:ServiceUser -ErrorAction SilentlyContinue
+    $existingUser = Get-LocalUser -Name $(Get-RRServiceUser) -ErrorAction SilentlyContinue
     
     if ($existingUser) {
         # Update password to ensure it matches current CustomerCode
         try {
             $existingUser | Set-LocalUser -Password $securePassword
-            Write-Host "[OK] Service account '$script:ServiceUser' password updated" -ForegroundColor Green
+            Write-Host "[OK] Service account '$(Get-RRServiceUser)' password updated" -ForegroundColor Green
         }
         catch {
             Write-Host "[WARN] Could not update service account password: $_" -ForegroundColor Yellow
@@ -156,7 +164,7 @@ function New-RingServiceAccount {
     else {
         # Create new user
         try {
-            New-LocalUser -Name $script:ServiceUser `
+            New-LocalUser -Name $(Get-RRServiceUser) `
                 -Password $securePassword `
                 -Description "VLABS Resilience Ring Service Account" `
                 -PasswordNeverExpires `
@@ -166,7 +174,7 @@ function New-RingServiceAccount {
             # Disable interactive login (optional security measure)
             # The account can still be used for SMB access
             
-            Write-Host "[OK] Service account '$script:ServiceUser' created" -ForegroundColor Green
+            Write-Host "[OK] Service account '$(Get-RRServiceUser)' created" -ForegroundColor Green
         }
         catch {
             Write-Host "[ERROR] Could not create service account: $_" -ForegroundColor Red
@@ -189,13 +197,13 @@ function Connect-RingShare {
     )
     
     $password = Get-RingServicePassword -CustomerCode $CustomerCode
-    $sharePath = "\\$TailscaleIP\$script:ShareName"
+    $sharePath = "\\$TailscaleIP\$(Get-RRShareName)"
     
     # Remove any existing connection to this share
     net use $sharePath /delete 2>$null | Out-Null
     
     # Connect with credentials
-    $result = net use $sharePath /user:$script:ServiceUser $password 2>&1
+    $result = net use $sharePath /user:$(Get-RRServiceUser) $password 2>&1
     
     if ($LASTEXITCODE -eq 0) {
         return $true
@@ -212,7 +220,7 @@ function Disconnect-RingShare {
     #>
     param([string]$TailscaleIP)
     
-    $sharePath = "\\$TailscaleIP\$script:ShareName"
+    $sharePath = "\\$TailscaleIP\$(Get-RRShareName)"
     net use $sharePath /delete 2>$null | Out-Null
 }
 
@@ -225,21 +233,26 @@ function Get-RingConfig {
     .SYNOPSIS
         Gets the local ring configuration
     #>
-    # Debug: Show which file we're checking
-    # Write-Host "[DEBUG] Looking for config at: $script:ConfigFile" -ForegroundColor DarkGray
+    $configFile = Get-RRConfigFile
     
-    if (Test-Path $script:ConfigFile) {
+    if (Test-Path $configFile) {
         try {
-            $content = Get-Content $script:ConfigFile -Raw -ErrorAction Stop
+            $content = Get-Content -Path $configFile -Raw -ErrorAction Stop
             if ([string]::IsNullOrWhiteSpace($content)) {
+                Write-Host "[WARN] Config file exists but is empty: $configFile" -ForegroundColor Yellow
                 return $null
             }
             return $content | ConvertFrom-Json
         }
         catch {
             Write-Host "[ERROR] Failed to read ring config: $_" -ForegroundColor Red
+            Write-Host "[ERROR] File: $configFile" -ForegroundColor Red
             return $null
         }
+    }
+    else {
+        # Uncomment for debugging
+        # Write-Host "[DEBUG] Config not found: $configFile" -ForegroundColor DarkGray
     }
     return $null
 }
@@ -251,7 +264,28 @@ function Save-RingConfig {
     #>
     param([hashtable]$Config)
     
-    $Config | ConvertTo-Json -Depth 10 | Set-Content $script:ConfigFile -Force
+    $configFile = Get-RRConfigFile
+    $dataPath = Get-RRDataPath
+    
+    # Ensure directory exists
+    if (-not (Test-Path $dataPath)) {
+        New-Item -Path $dataPath -ItemType Directory -Force | Out-Null
+    }
+    
+    try {
+        $json = $Config | ConvertTo-Json -Depth 10
+        $json | Set-Content -Path $configFile -Force -ErrorAction Stop
+        
+        # Verify write was successful
+        if (Test-Path $configFile) {
+            $size = (Get-Item $configFile).Length
+            Write-Host "[OK] Config saved ($size bytes): $configFile" -ForegroundColor Green
+        }
+    }
+    catch {
+        Write-Host "[ERROR] Failed to save config: $_" -ForegroundColor Red
+        Write-Host "[ERROR] Path: $configFile" -ForegroundColor Red
+    }
 }
 
 function Get-LocalCustomerCode {
@@ -293,8 +327,8 @@ function Get-StoragePeersList {
     .SYNOPSIS
         Gets the local storage peers list
     #>
-    if (Test-Path $script:StoragePeersFile) {
-        $data = Get-Content $script:StoragePeersFile -Raw | ConvertFrom-Json
+    if (Test-Path $(Get-RRPeersFile)) {
+        $data = Get-Content $(Get-RRPeersFile) -Raw | ConvertFrom-Json
         return @($data.Peers)
     }
     return @()
@@ -317,7 +351,7 @@ function Save-StoragePeersList {
         Peers = $Peers
     }
     
-    $peerData | ConvertTo-Json -Depth 10 | Set-Content $script:StoragePeersFile -Force
+    $peerData | ConvertTo-Json -Depth 10 | Set-Content $(Get-RRPeersFile) -Force
 }
 
 function Add-PeerToList {
@@ -585,7 +619,7 @@ function Test-PeerSmbShare {
     $connected = Connect-RingShare -TailscaleIP $TailscaleIP -CustomerCode $config.CustomerCode
     
     if ($connected) {
-        $sharePath = "\\$TailscaleIP\$script:ShareName"
+        $sharePath = "\\$TailscaleIP\$(Get-RRShareName)"
         
         try {
             $job = Start-Job -ScriptBlock {
@@ -622,7 +656,7 @@ function Get-PeerInfo {
     #>
     param([string]$TailscaleIP)
     
-    $remotePath = "\\$TailscaleIP\$script:ShareName\peer-info.json"
+    $remotePath = "\\$TailscaleIP\$(Get-RRShareName)\peer-info.json"
     
     try {
         $job = Start-Job -ScriptBlock {
@@ -840,9 +874,9 @@ function Add-StoragePeer {
     Write-Host "STEP 8: Creating SMB Share" -ForegroundColor Yellow
     Write-Host "---------------------------" -ForegroundColor Yellow
     
-    $existingShare = Get-SmbShare -Name $script:ShareName -ErrorAction SilentlyContinue
+    $existingShare = Get-SmbShare -Name $(Get-RRShareName) -ErrorAction SilentlyContinue
     if ($existingShare) {
-        Write-Host "[INFO] Share '$script:ShareName' already exists" -ForegroundColor Yellow
+        Write-Host "[INFO] Share '$(Get-RRShareName)' already exists" -ForegroundColor Yellow
         Write-Host "  Current path: $($existingShare.Path)" -ForegroundColor Gray
         
         if ($existingShare.Path -ne $storagePath) {
@@ -851,7 +885,7 @@ function Add-StoragePeer {
             $updateShare = Read-Host
             
             if ($updateShare -eq '' -or $updateShare -match '^[Yy]') {
-                Remove-SmbShare -Name $script:ShareName -Force -ErrorAction SilentlyContinue
+                Remove-SmbShare -Name $(Get-RRShareName) -Force -ErrorAction SilentlyContinue
                 $existingShare = $null
             }
         }
@@ -859,9 +893,9 @@ function Add-StoragePeer {
             # Update permissions on existing share
             try {
                 # Revoke all existing permissions and set new ones
-                Revoke-SmbShareAccess -Name $script:ShareName -AccountName "Everyone" -Force -ErrorAction SilentlyContinue
-                Grant-SmbShareAccess -Name $script:ShareName -AccountName $script:ServiceUser -AccessRight Full -Force | Out-Null
-                Write-Host "[OK] Updated share permissions for '$script:ServiceUser'" -ForegroundColor Green
+                Revoke-SmbShareAccess -Name $(Get-RRShareName) -AccountName "Everyone" -Force -ErrorAction SilentlyContinue
+                Grant-SmbShareAccess -Name $(Get-RRShareName) -AccountName $(Get-RRServiceUser) -AccessRight Full -Force | Out-Null
+                Write-Host "[OK] Updated share permissions for '$(Get-RRServiceUser)'" -ForegroundColor Green
             }
             catch {
                 Write-Host "[WARN] Could not update share permissions: $_" -ForegroundColor Yellow
@@ -872,12 +906,12 @@ function Add-StoragePeer {
     if (-not $existingShare) {
         try {
             # Create share with RR_Service having full access
-            New-SmbShare -Name $script:ShareName -Path $storagePath -FullAccess $script:ServiceUser -Description "VLABS Resilience Ring Storage" | Out-Null
+            New-SmbShare -Name $(Get-RRShareName) -Path $storagePath -FullAccess $(Get-RRServiceUser) -Description "VLABS Resilience Ring Storage" | Out-Null
             Write-Host "[OK] Created network share with service account access" -ForegroundColor Green
         }
         catch {
             Write-Host "[ERROR] Could not create SMB share: $_" -ForegroundColor Red
-            Write-Host "Please manually share '$storagePath' as '$script:ShareName'" -ForegroundColor Yellow
+            Write-Host "Please manually share '$storagePath' as '$(Get-RRShareName)'" -ForegroundColor Yellow
             Read-Host "`nPress Enter to return"
             return
         }
@@ -887,7 +921,7 @@ function Add-StoragePeer {
     try {
         $acl = Get-Acl $storagePath
         $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $script:ServiceUser, 
+            $(Get-RRServiceUser), 
             "FullControl", 
             "ContainerInherit,ObjectInherit", 
             "None", 
@@ -895,7 +929,7 @@ function Add-StoragePeer {
         )
         $acl.AddAccessRule($rule)
         Set-Acl $storagePath $acl
-        Write-Host "[OK] Set NTFS permissions for '$script:ServiceUser'" -ForegroundColor Green
+        Write-Host "[OK] Set NTFS permissions for '$(Get-RRServiceUser)'" -ForegroundColor Green
     }
     catch {
         Write-Host "[WARN] Could not set NTFS permissions: $_" -ForegroundColor Yellow
@@ -905,7 +939,7 @@ function Add-StoragePeer {
     $tailscaleHostname = $tsStatus.Self.DNSName -replace '\..*$', ''  # Get just the hostname part
     if (-not $tailscaleHostname) { $tailscaleHostname = $tsStatus.Self.HostName }
     
-    Write-Host "[OK] Share accessible at: \\$tailscaleHostname\$script:ShareName" -ForegroundColor Green
+    Write-Host "[OK] Share accessible at: \\$tailscaleHostname\$(Get-RRShareName)" -ForegroundColor Green
     
     Write-Host ""
     
@@ -975,9 +1009,9 @@ function Add-StoragePeer {
     Write-Host "  Tailscale Tag:  $($config.TailscaleTag)" -ForegroundColor White
     Write-Host "  Location:       $locationName" -ForegroundColor White
     Write-Host "  Storage:        $($config.StoragePath)" -ForegroundColor White
-    Write-Host "  Share:          \\$tailscaleHostname\$script:ShareName" -ForegroundColor White
+    Write-Host "  Share:          \\$tailscaleHostname\$(Get-RRShareName)" -ForegroundColor White
     Write-Host "  Quota:          $($config.QuotaGB) GB" -ForegroundColor White
-    Write-Host "  Service User:   $script:ServiceUser" -ForegroundColor White
+    Write-Host "  Service User:   $(Get-RRServiceUser)" -ForegroundColor White
     Write-Host ""
     Write-Host "This machine is now part of the Resilience Ring!" -ForegroundColor Yellow
     Write-Host "Other peers can discover it using 'Discover & Update' (D)." -ForegroundColor Yellow
@@ -1203,7 +1237,7 @@ function Update-PeerList {
         }
         
         # Test SMB share access
-        $sharePath = "\\$($peer.TailscaleIP)\$script:ShareName"
+        $sharePath = "\\$($peer.TailscaleIP)\$(Get-RRShareName)"
         $shareExists = Test-Path $sharePath -ErrorAction SilentlyContinue
         if (-not $shareExists) {
             Write-Host " [NO SHARE]" -ForegroundColor Yellow
@@ -1326,7 +1360,7 @@ function Get-AvailableStoragePeers {
         }
         
         # Verify share exists
-        $sharePath = "\\$($peer.TailscaleIP)\$script:ShareName"
+        $sharePath = "\\$($peer.TailscaleIP)\$(Get-RRShareName)"
         $shareExists = Test-Path $sharePath -ErrorAction SilentlyContinue
         
         Disconnect-RingShare -TailscaleIP $peer.TailscaleIP
@@ -1371,7 +1405,7 @@ function Get-DestinationPath {
     if (-not $typeFolder) { $typeFolder = $BackupType.ToLower() }
     
     # Build path: \\IP\RR_Backups\CODE\Location\Application\type\
-    $destPath = "\\$TailscaleIP\$script:ShareName\$($CustomerCode.ToUpper())\$Location\$Application\$typeFolder"
+    $destPath = "\\$TailscaleIP\$(Get-RRShareName)\$($CustomerCode.ToUpper())\$Location\$Application\$typeFolder"
     
     return $destPath
 }
