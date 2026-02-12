@@ -313,7 +313,7 @@ function Save-RingConfig {
     .SYNOPSIS
         Saves the ring configuration
     #>
-    param([hashtable]$Config)
+    param($Config)  # Can be hashtable or PSObject
     
     # HARDCODED path - uses ProgramData to survive git updates
     $configFile = "C:\ProgramData\VLABS_ResilienceRing\ring-config.json"

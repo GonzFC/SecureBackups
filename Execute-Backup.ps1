@@ -300,7 +300,8 @@ function Invoke-BackupToPeer {
         Executes backup to a single peer with retention management
     #>
     param(
-        [hashtable]$Peer,
+        [Parameter(Mandatory=$true)]
+        $Peer,  # Can be hashtable or PSObject (from JSON)
         $Job,
         [string]$RetentionType
     )
