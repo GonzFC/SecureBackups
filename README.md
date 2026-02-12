@@ -1,36 +1,35 @@
-# Resilience Ring
+# VLABS Resilience Ring
 
-**Distributed Backup System** - Small but professional tool to backup files and databases to NAT-traversal locations via Tailscale.
+**Distributed Backup System** - Professional backup tool that automatically replicates data across multiple storage peers via Tailscale.
 
-## Quick Start (One-Liner)
+## Quick Start
 
 ```powershell
 iex (irm https://raw.githubusercontent.com/GonzFC/SecureBackups/main/install.ps1)
 ```
 
-Or the longer form:
-```powershell
-irm https://raw.githubusercontent.com/GonzFC/SecureBackups/main/install.ps1 | iex
-```
-
 ## What is Resilience Ring?
 
-Resilience Ring creates a distributed backup mesh where each site in your organization backs up to multiple peer sites. Instead of relying on a single backup server (single point of failure), your backups are distributed across your network.
+Resilience Ring creates a distributed backup mesh where each site backs up to **multiple peer sites automatically**. No single point of failure.
 
 ```
-   Site A (SLP) ──────► Site B (MTY)
-       │                    │
-       │                    │
-       ▼                    ▼
-   Site C (GDL) ◄────── Site D (CDMX)
+   San Antonio ──────► Houston
+       │    \          /   │
+       │     \        /    │
+       ▼      ▼      ▼     ▼
+   Austin ◄──────── Dallas
+   
+   Every backup exists on at least 2 remote peers
 ```
 
-**Key Features:**
+## Key Features
+
 - 🔄 **Self-updating** - Always runs the latest version
-- 🔐 **Secure** - Credentials encrypted with Windows DPAPI
-- 🌐 **NAT Traversal** - Uses Tailscale for connectivity
+- 🎯 **Smart Peer Selection** - Automatically distributes to least-used peers
+- 📅 **Retention Policies** - Monthly, weekly, and recent backups
 - ✅ **Integrity Verification** - SHA256 checksums post-copy
-- 📊 **VLABS Monitor Ready** - Telemetry hooks for central monitoring
+- 🌐 **NAT Traversal** - Uses Tailscale for connectivity
+- 📊 **VLABS Monitor Ready** - Telemetry for central monitoring
 
 ## Requirements
 
@@ -39,72 +38,126 @@ Resilience Ring creates a distributed backup mesh where each site in your organi
 - [Tailscale](https://tailscale.com/) installed and connected
 - Administrator privileges
 
+## Setup Flow
+
+### 1. Add Storage Peer (P)
+
+Run on each machine that will participate in the ring:
+
+```
+STEP 1: Tailscale Setup
+STEP 2: Customer Codename (e.g., "vlabs")
+STEP 3: Tailscale Tag (e.g., "tag:rr-vlabs")
+STEP 4: Location Name (e.g., "San Antonio Office")
+STEP 5: Storage Path (e.g., "D:\Backups")
+STEP 6: Storage Quota (e.g., 500 GB)
+```
+
+This creates:
+- Local service account `RR_Service` for SMB access
+- SMB share `RR_Backups` with proper permissions
+- Registration in the peer mesh
+
+### 2. Discover Peers (D)
+
+After setting up multiple machines, run D to discover all peers with the same tag.
+
+### 3. Create Backup Job
+
+Creates a backup job with automatic peer selection:
+
+```
+STEP 1: Application Name (e.g., "Community")
+STEP 2: Backup Type (F=File, D=Directory, SQL=Database)
+STEP 3: Backup Object (source path)
+STEP 4: Retention Policy
+        - Monthly copies (last day of month): 3
+        - Weekly copies (Saturdays): 4
+        - Recent copies: 2
+STEP 5: Frequency (every N hours, starting at HH:00)
+```
+
+## Retention Policy
+
+The retention system keeps organized copies:
+
+| Type | Naming Convention | Example |
+|------|-------------------|---------|
+| Monthly | `AppName-YYYY-MM-monthly` | `Community-2026-01-monthly` |
+| Weekly | `AppName-YYYY-MM-DD-weekly` | `Community-2026-02-08-weekly` |
+| Recent | `AppName-YYYY-MM-DD-HHMM` | `Community-2026-02-12-1430` |
+
+With retention policy (3, 4, 2):
+- 3 monthly backups (last 3 months' end-of-month)
+- 4 weekly backups (last 4 Saturdays)
+- 2 recent backups (last 2 runs)
+- **Total: Up to 9 copies** across all peers
+
+## Peer Selection Algorithm
+
+Backups are **automatically distributed** to at least 2 remote peers:
+
+1. **Minimum 2 Peers** - Every backup exists in 3 places (source + 2 peers)
+2. **Even Distribution** - Selects peers with lowest storage usage
+3. **Capacity Aware** - Only uses larger peers when smaller ones hit 70%
+4. **Auto-Failover** - If a peer is offline, uses next best available
+
+## File Structure
+
+```
+C:\VLABS_ResilienceRing\           ← Scripts (git repo)
+├── ResilienceRing.ps1
+├── Execute-Backup.ps1
+├── PeerManagement.ps1
+└── ...
+
+C:\ProgramData\VLABS_ResilienceRing\  ← Data (persists across updates)
+├── ring-config.json
+├── storage-peers.json
+├── jobs.json
+└── Logs\
+
+\\peer\RR_Backups\                 ← Remote storage
+└── CUSTOMER_CODE\
+    └── Location\
+        └── Application\
+            └── type\
+                ├── AppName-2026-01-monthly\
+                ├── AppName-2026-02-08-weekly\
+                └── AppName-2026-02-12-1430\
+```
+
 ## Backup Types
 
 | Type | Description | Use Case |
 |------|-------------|----------|
-| **F** (File) | Single file backup with timestamp | Critical config files, databases |
-| **D** (Directory) | Full directory mirror | Document folders, application data |
-| **SQL** | SQL Server backup folder sync | Database backup directories |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    RESILIENCE RING                       │
-├─────────────────────────────────────────────────────────┤
-│  install.ps1        → Bootstrap installer (one-liner)   │
-│  ResilienceRing.ps1 → Main TUI with auto-update         │
-│  Execute-Backup.ps1 → Scheduled task executor           │
-│  version.txt        → Version control                   │
-└─────────────────────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────┐
-│                    VLABS MONITOR                         │
-│              (Central Monitoring Server)                 │
-├─────────────────────────────────────────────────────────┤
-│  • Collector API (receives telemetry)                   │
-│  • Dashboard (status of all nodes)                      │
-│  • Alert Engine (Telegram notifications)                │
-└─────────────────────────────────────────────────────────┘
-```
-
-## Configuration
-
-Configuration files are stored in the installation directory:
-
-| File | Purpose |
-|------|---------|
-| `destinations.json` | Backup target definitions (SMB paths + credentials) |
-| `jobs.json` | Backup job configurations |
-| `Logs/` | Daily logs with auto-archival |
+| **F** (File) | Single file with timestamp | Config files, small databases |
+| **D** (Directory) | Full directory mirror | Document folders, app data |
+| **SQL** | SQL Server backup folder | Database backup directories |
 
 ## Usage
 
-### From the TUI
-
-Run the installer/updater, then use the menu:
+### Main Menu
 
 ```
 ========================================
-         RESILIENCE RING v1.1.0
+      VLABS RESILIENCE RING v1.8.0
     Distributed Backup System
 ========================================
 
- DESTINATIONS
-   1. Create Destination
-   2. Edit Destination
-   3. Delete Destination
-
  BACKUP JOBS
-   4. Create Backup Job
-   5. Edit Backup Job
-   6. Delete Backup Job
-   7. Run Backup Job Now
+   1. Create Backup Job
+   2. Edit Backup Job
+   3. Delete Backup Job
+   4. Run Backup Job Now
+   5. Show All Backup Jobs
+
+ STORAGE PEERS
+   P. Add Storage Peer (configure this machine)
+   S. Show Available Storage Peers
+   D. Discover & Update Peer List
 
  STATUS
-   8. Show All Backup Jobs
    9. View Status & History
 
  SYSTEM
@@ -112,42 +165,29 @@ Run the installer/updater, then use the menu:
    0. Exit
 ```
 
-### Scheduled Execution
+## Scheduled Execution
 
-Backup jobs automatically create Windows Scheduled Tasks. The executor script runs independently with full logging and checksum verification.
-
-## VLABS Monitor Integration
-
-When VLABS Monitor is deployed, set the environment variable:
-
-```powershell
-$env:VLABS_MONITOR_URL = "http://100.x.x.x:8080/api"
-```
-
-The client will then report:
-- Backup success/failure
-- Checksum verification results
-- Periodic heartbeats
+Each backup job creates a Windows Scheduled Task:
+- Name: `VLABS_Backup_<JobName>`
+- Runs every N hours at specified start time
+- Executes `Execute-Backup.ps1 -JobName "<JobName>"`
 
 ## Updating
 
-From the menu, press `U` to check for and apply updates. The update preserves your configuration files.
-
-Or re-run the one-liner:
+Press `U` from the menu or re-run:
 ```powershell
 iex (irm https://raw.githubusercontent.com/GonzFC/SecureBackups/main/install.ps1)
 ```
 
-## Security Notes
+Configuration is preserved (stored in `C:\ProgramData\VLABS_ResilienceRing\`).
 
-- Credentials are encrypted using Windows DPAPI (machine/user-specific)
-- All traffic travels over Tailscale (WireGuard encrypted)
-- Files at rest are not encrypted (same legal entity owns all nodes)
+## Security
 
-## License
-
-Proprietary - VLABS Internal Use
+- **SMB Access**: Dedicated `RR_Service` account with deterministic password
+- **Transport**: All traffic over Tailscale (WireGuard encrypted)
+- **At Rest**: Not encrypted (same legal entity owns all nodes)
+- **Credentials**: AES-256 encrypted using machine GUID
 
 ---
 
-**Powered by VLABS** | Part of the VLABS Infrastructure Toolkit
+**Powered by VLABS** | Resilience Ring v1.8.0

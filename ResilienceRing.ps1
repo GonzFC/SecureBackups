@@ -27,7 +27,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.7.1'
+$script:AppVersion = '1.8.0'
 $script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -463,6 +463,18 @@ if (Test-Path $peerScript) {
     }
 }
 
+# Load Backup Job functions (unified workflow)
+$backupJobScript = Join-Path $PSScriptRoot "BackupJob.ps1"
+if (Test-Path $backupJobScript) {
+    try {
+        . $backupJobScript
+        Write-Host "[OK] Backup job module loaded" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "[WARN] Backup job module not loaded: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 #endregion
 
 #region Main Menu
@@ -475,23 +487,16 @@ function Show-MainMenu {
     Write-Host "            v$script:AppVersion" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
 
-    Write-Host " DESTINATIONS" -ForegroundColor Yellow
-    Write-Host "   1. Create Destination" -ForegroundColor White
-    Write-Host "   2. Edit Destination" -ForegroundColor White
-    Write-Host "   3. Delete Destination" -ForegroundColor White
-
-    Write-Host ""
     Write-Host " BACKUP JOBS" -ForegroundColor Yellow
-    Write-Host "   4. Create Backup Job" -ForegroundColor White
-    Write-Host "   5. Edit Backup Job" -ForegroundColor White
-    Write-Host "   6. Delete Backup Job" -ForegroundColor White
-    Write-Host "   7. Run Backup Job Now" -ForegroundColor White
+    Write-Host "   1. Create Backup Job" -ForegroundColor White
+    Write-Host "   2. Edit Backup Job" -ForegroundColor White
+    Write-Host "   3. Delete Backup Job" -ForegroundColor White
+    Write-Host "   4. Run Backup Job Now" -ForegroundColor White
+    Write-Host "   5. Show All Backup Jobs" -ForegroundColor White
 
     Write-Host ""
     Write-Host " STATUS" -ForegroundColor Yellow
     Write-Host "   8. Show All Backup Jobs" -ForegroundColor White
-    Write-Host "   9. View Status & History" -ForegroundColor White
-
     Write-Host ""
     Write-Host " STORAGE PEERS" -ForegroundColor Yellow
     Write-Host "   P. Add Storage Peer (configure this machine)" -ForegroundColor White
@@ -499,9 +504,8 @@ function Show-MainMenu {
     Write-Host "   D. Discover & Update Peer List" -ForegroundColor White
 
     Write-Host ""
-    Write-Host " MAINTENANCE" -ForegroundColor Yellow
-    Write-Host "   R. Re-authenticate All Destinations" -ForegroundColor White
-    Write-Host "   T. Test Credential Decryption" -ForegroundColor White
+    Write-Host " STATUS" -ForegroundColor Yellow
+    Write-Host "   9. View Status & History" -ForegroundColor White
 
     Write-Host ""
     Write-Host " SYSTEM" -ForegroundColor Yellow
@@ -517,20 +521,29 @@ function Start-MainLoop {
         $choice = Read-Host "`nEnter your choice"
 
         switch ($choice.ToUpper()) {
-            "1" { New-BackupDestination }
-            "2" { Edit-BackupDestination }
-            "3" { Remove-BackupDestination }
-            "4" { New-BackupJob }
-            "5" { Edit-BackupJob }
-            "6" { Remove-BackupJob }
-            "7" { Invoke-BackupJobNow }
-            "8" { Show-AllBackupJobs }
-            "9" { Show-BackupStatus }
+            # Backup Jobs (unified workflow)
+            "1" { 
+                if (Get-Command 'New-UnifiedBackupJob' -ErrorAction SilentlyContinue) {
+                    New-UnifiedBackupJob
+                } else {
+                    Write-Host "Unified backup not available, using legacy..." -ForegroundColor Yellow
+                    New-BackupJob
+                }
+            }
+            "2" { Edit-BackupJob }
+            "3" { Remove-BackupJob }
+            "4" { Invoke-BackupJobNow }
+            "5" { Show-AllBackupJobs }
+            
+            # Storage Peers
             "P" { Add-StoragePeer }
             "S" { Show-StoragePeers }
             "D" { Update-PeerList; Read-Host "`nPress Enter to continue" }
-            "R" { Invoke-ReauthenticateAllDestinations }
-            "T" { Test-DestinationCredentials }
+            
+            # Status
+            "9" { Show-BackupStatus }
+            
+            # System
             "U" { Invoke-SelfUpdate }
             "0" {
                 Write-Host "`nExiting Resilience Ring..." -ForegroundColor Cyan
