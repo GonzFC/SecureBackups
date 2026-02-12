@@ -25,7 +25,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.0.2'
+$script:AppVersion = '1.0.3'
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -337,18 +337,21 @@ function Get-RRMServicePassword {
     <#
     .SYNOPSIS
         Generates deterministic service account password from customer code
-        (Same algorithm as Resilience Ring client)
+        (MUST match Get-RingServicePassword in PeerManagement.ps1)
     #>
     param([string]$CustomerCode)
     
-    $baseString = "VLABS_RR_$($CustomerCode.ToUpper())_Service_2024"
+    # Same algorithm as Resilience Ring client
+    $salt = "ResilienceRing2026!"
+    $combined = "$CustomerCode$salt"
+    
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($baseString)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($combined)
     $hash = $sha256.ComputeHash($bytes)
     $hashString = [BitConverter]::ToString($hash) -replace '-', ''
     
-    # Take first 16 chars and add complexity
-    $password = $hashString.Substring(0, 12) + "Rr#1"
+    # Take first 12 chars + add complexity requirements
+    $password = $hashString.Substring(0, 12) + "Rr1!"
     return $password
 }
 
@@ -623,12 +626,14 @@ function Show-RingStatistics {
     $script:ActiveRingData = $stats
     
     # Update last scan time
-    $rings = Get-SavedRings
-    $ringIndex = [array]::FindIndex($rings, [Predicate[object]]{ param($r) $r.Tag -eq $script:ActiveRing.Tag })
-    if ($ringIndex -ge 0) {
-        $rings[$ringIndex].LastScan = $stats.ScanTime
-        $rings[$ringIndex].PeerCount = $stats.TotalPeers
-        Save-Rings -Rings $rings
+    [array]$rings = @(Get-SavedRings)
+    for ($i = 0; $i -lt $rings.Count; $i++) {
+        if ($rings[$i].Tag -eq $script:ActiveRing.Tag) {
+            $rings[$i].LastScan = $stats.ScanTime
+            $rings[$i].PeerCount = $stats.TotalPeers
+            Save-Rings -Rings $rings
+            break
+        }
     }
     
     Write-Host ""
