@@ -1598,6 +1598,156 @@ function Invoke-StartupDiscovery {
 
 #endregion
 
+#region Startup Validation
+
+function Invoke-JobsValidation {
+    <#
+    .SYNOPSIS
+        Validates jobs.json format and syncs with Windows Scheduled Tasks
+    .DESCRIPTION
+        Called on TUI startup to ensure:
+        1. Jobs have all required fields (migrates legacy format if needed)
+        2. Each job has a corresponding scheduled task
+        3. Orphaned tasks are reported
+    .OUTPUTS
+        Returns validation result object with Issues array
+    #>
+    $result = @{
+        JobsChecked = 0
+        JobsMigrated = 0
+        TasksCreated = 0
+        TasksFixed = 0
+        Issues = @()
+    }
+    
+    $jobsFile = Join-Path (Get-RRDataPath) "jobs.json"
+    if (-not (Test-Path $jobsFile)) {
+        return $result
+    }
+    
+    try {
+        $jobs = @(Get-Content $jobsFile -Raw | ConvertFrom-Json)
+    }
+    catch {
+        $result.Issues += "Could not parse jobs.json: $_"
+        return $result
+    }
+    
+    if ($jobs.Count -eq 0) { return $result }
+    
+    $modified = $false
+    $result.JobsChecked = $jobs.Count
+    
+    for ($i = 0; $i -lt $jobs.Count; $i++) {
+        $job = $jobs[$i]
+        
+        # Ensure TaskName exists
+        if (-not $job.TaskName) {
+            $jobs[$i] | Add-Member -NotePropertyName 'TaskName' -NotePropertyValue "VLABS_Backup_$($job.JobName)" -Force
+            $modified = $true
+            $result.JobsMigrated++
+        }
+        
+        # Ensure Enabled field exists
+        if ($null -eq $job.Enabled) {
+            $jobs[$i] | Add-Member -NotePropertyName 'Enabled' -NotePropertyValue $true -Force
+            $modified = $true
+        }
+        
+        # Ensure AppName exists (for legacy jobs)
+        if (-not $job.AppName -and $job.JobName) {
+            $jobs[$i] | Add-Member -NotePropertyName 'AppName' -NotePropertyValue $job.JobName -Force
+            $modified = $true
+            $result.JobsMigrated++
+        }
+        
+        # Ensure LastDurationSeconds and LastSizeBytes exist
+        if ($null -eq $job.LastDurationSeconds) {
+            $jobs[$i] | Add-Member -NotePropertyName 'LastDurationSeconds' -NotePropertyValue 0 -Force
+            $modified = $true
+        }
+        if ($null -eq $job.LastSizeBytes) {
+            $jobs[$i] | Add-Member -NotePropertyName 'LastSizeBytes' -NotePropertyValue 0 -Force
+            $modified = $true
+        }
+        
+        # Check scheduled task exists
+        $taskName = $jobs[$i].TaskName
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        
+        if (-not $task) {
+            # Task missing - try to recreate if we have enough info
+            if ($job.Frequency -and $null -ne $job.StartHour) {
+                try {
+                    if (Get-Command 'New-ScheduledBackupTask' -ErrorAction SilentlyContinue) {
+                        $createResult = New-ScheduledBackupTask -Job $jobs[$i]
+                        if ($createResult) {
+                            $result.TasksCreated++
+                        }
+                        else {
+                            $result.Issues += "Could not create task for job: $($job.JobName)"
+                        }
+                    }
+                }
+                catch {
+                    $result.Issues += "Error creating task for $($job.JobName): $_"
+                }
+            }
+            else {
+                $result.Issues += "Missing task for job '$($job.JobName)' (insufficient schedule info)"
+            }
+        }
+        else {
+            # Task exists - check if enabled state matches
+            $taskEnabled = ($task.State -ne 'Disabled')
+            $jobEnabled = ($job.Enabled -ne $false)
+            
+            if ($taskEnabled -ne $jobEnabled) {
+                try {
+                    if ($jobEnabled) {
+                        Enable-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
+                    }
+                    else {
+                        Disable-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
+                    }
+                    $result.TasksFixed++
+                }
+                catch {
+                    $result.Issues += "Could not sync task state for $($job.JobName): $_"
+                }
+            }
+        }
+    }
+    
+    # Save if modified
+    if ($modified) {
+        try {
+            $jobs | ConvertTo-Json -Depth 10 | Set-Content $jobsFile -Force
+        }
+        catch {
+            $result.Issues += "Could not save migrated jobs: $_"
+        }
+    }
+    
+    # Check for orphaned tasks (tasks without jobs)
+    try {
+        $vlabsTasks = Get-ScheduledTask -TaskPath '\' -ErrorAction SilentlyContinue | 
+                      Where-Object { $_.TaskName -like 'VLABS_Backup_*' }
+        
+        foreach ($task in $vlabsTasks) {
+            $jobExists = $jobs | Where-Object { $_.TaskName -eq $task.TaskName }
+            if (-not $jobExists) {
+                $result.Issues += "Orphaned task found: $($task.TaskName) (no matching job)"
+            }
+        }
+    }
+    catch { }
+    
+    return $result
+}
+
+#endregion
+
 #region Node Status Publishing
 
 function Publish-NodeStatus {

@@ -27,7 +27,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.8.5'
+$script:AppVersion = '1.8.6'
 $script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -582,10 +582,36 @@ elseif ($ForceUpdate) {
     Invoke-SelfUpdate -Force
 }
 
-# Run startup discovery
+# Run startup discovery (peer scan)
 Write-Host ""
 if (Get-Command 'Invoke-StartupDiscovery' -ErrorAction SilentlyContinue) {
     Invoke-StartupDiscovery
+}
+
+# Validate jobs and scheduled tasks
+if (Get-Command 'Invoke-JobsValidation' -ErrorAction SilentlyContinue) {
+    Write-Host "Validating jobs and tasks..." -ForegroundColor Gray -NoNewline
+    $validation = Invoke-JobsValidation
+    
+    if ($validation.Issues.Count -eq 0) {
+        $summary = @()
+        if ($validation.JobsMigrated -gt 0) { $summary += "$($validation.JobsMigrated) migrated" }
+        if ($validation.TasksCreated -gt 0) { $summary += "$($validation.TasksCreated) tasks created" }
+        if ($validation.TasksFixed -gt 0) { $summary += "$($validation.TasksFixed) tasks fixed" }
+        
+        if ($summary.Count -gt 0) {
+            Write-Host " [OK: $($summary -join ', ')]" -ForegroundColor Green
+        }
+        else {
+            Write-Host " [OK: $($validation.JobsChecked) jobs]" -ForegroundColor Green
+        }
+    }
+    else {
+        Write-Host " [ISSUES]" -ForegroundColor Yellow
+        foreach ($issue in $validation.Issues) {
+            Write-Host "  ! $issue" -ForegroundColor Yellow
+        }
+    }
 }
 
 # Publish node status for RRM

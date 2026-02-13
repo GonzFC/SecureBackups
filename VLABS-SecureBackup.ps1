@@ -1305,12 +1305,19 @@ function Edit-BackupJob {
         return
     }
 
-    # Display jobs
+    # Display jobs with details
+    Write-Host "Available Jobs:" -ForegroundColor Yellow
+    Write-Host ""
     for ($i = 0; $i -lt $jobs.Count; $i++) {
-        Write-Host "[$($i + 1)] $($jobs[$i].JobName)" -ForegroundColor Yellow
+        $j = $jobs[$i]
+        $status = if ($j.Enabled -eq $false) { "[DISABLED]" } else { "" }
+        $lastStatus = if ($j.LastStatus) { "- Last: $($j.LastStatus)" } else { "- Never run" }
+        Write-Host "  [$($i + 1)] $($j.JobName) $status" -ForegroundColor $(if($j.Enabled -eq $false){"Gray"}else{"White"})
+        Write-Host "      Type: $($j.BackupType) | Source: $(Split-Path $j.BackupObject -Leaf) $lastStatus" -ForegroundColor Gray
     }
 
-    $selection = Read-Host "`nSelect job number to edit (or 0 to cancel)"
+    Write-Host ""
+    $selection = Read-Host "Select job number to edit (or 0 to cancel)"
     $index = [int]$selection - 1
 
     if ($selection -eq "0" -or $index -lt 0 -or $index -ge $jobs.Count) {
@@ -1318,40 +1325,102 @@ function Edit-BackupJob {
     }
 
     $job = $jobs[$index]
+    
+    # Determine if new format (has RetentionMonthly) or legacy (has Retention)
+    $isNewFormat = $null -ne $job.RetentionMonthly
 
-    Write-Host "`nEditing: $($job.JobName)" -ForegroundColor Yellow
-    Write-Host "`nWhat would you like to edit?" -ForegroundColor Cyan
-    Write-Host "1. Retention ($($job.Retention) copies)"
-    Write-Host "2. Frequency (Every $($job.Frequency) hours, starting at $($job.StartHour):00)"
-    Write-Host "3. Enable/Disable Job (Currently: $(if($job.Enabled){'Enabled'}else{'Disabled'}))"
-    Write-Host "4. Cancel"
+    Clear-Host
+    Write-Host "`n===============================================" -ForegroundColor Cyan
+    Write-Host "     EDIT: $($job.JobName)" -ForegroundColor Cyan
+    Write-Host "===============================================`n" -ForegroundColor Cyan
+    
+    # Show current settings
+    Write-Host "Current Settings:" -ForegroundColor Yellow
+    Write-Host "  Application:  $($job.AppName)" -ForegroundColor White
+    Write-Host "  Type:         $($job.BackupType)" -ForegroundColor White
+    Write-Host "  Source:       $($job.BackupObject)" -ForegroundColor White
+    if ($job.SourceLocation) {
+        Write-Host "  Location:     $($job.SourceLocation)" -ForegroundColor White
+    }
+    
+    if ($isNewFormat) {
+        Write-Host "  Retention:    $($job.RetentionMonthly) monthly, $($job.RetentionWeekly) weekly, $($job.RetentionRecent) recent" -ForegroundColor White
+        if ($job.PeerDestinations) {
+            Write-Host "  Peers:        $($job.PeerDestinations.Count) destination(s)" -ForegroundColor White
+        }
+    }
+    else {
+        Write-Host "  Retention:    $($job.Retention) copies (legacy)" -ForegroundColor White
+    }
+    
+    Write-Host "  Frequency:    Every $($job.Frequency) hour(s), starting at $($job.StartHour):00" -ForegroundColor White
+    Write-Host "  Status:       $(if($job.Enabled -ne $false){'Enabled'}else{'Disabled'})" -ForegroundColor $(if($job.Enabled -ne $false){"Green"}else{"Red"})
+    
+    Write-Host ""
+    Write-Host "What would you like to edit?" -ForegroundColor Cyan
+    Write-Host "  1. Retention policy"
+    Write-Host "  2. Schedule (frequency and start hour)"
+    Write-Host "  3. Enable/Disable job"
+    Write-Host "  4. Source path"
+    Write-Host "  0. Cancel"
 
     $choice = Read-Host "`nEnter choice"
 
     switch ($choice) {
         "1" {
-            $newRetention = Read-Host "Enter new retention (number of copies to keep)"
-            if (($newRetention -as [int]) -and [int]$newRetention -gt 0) {
-                $jobs[$index].Retention = [int]$newRetention
-                Write-Host "`nRetention updated!" -ForegroundColor Green
+            Write-Host ""
+            if ($isNewFormat) {
+                Write-Host "Current: $($job.RetentionMonthly) monthly, $($job.RetentionWeekly) weekly, $($job.RetentionRecent) recent" -ForegroundColor Gray
+                Write-Host ""
+                $newMonthly = Read-Host "Monthly copies (last day of month) [$($job.RetentionMonthly)]"
+                $newWeekly = Read-Host "Weekly copies (Saturdays) [$($job.RetentionWeekly)]"
+                $newRecent = Read-Host "Recent copies [$($job.RetentionRecent)]"
+                
+                if ([string]::IsNullOrWhiteSpace($newMonthly)) { $newMonthly = $job.RetentionMonthly }
+                if ([string]::IsNullOrWhiteSpace($newWeekly)) { $newWeekly = $job.RetentionWeekly }
+                if ([string]::IsNullOrWhiteSpace($newRecent)) { $newRecent = $job.RetentionRecent }
+                
+                if (($newMonthly -as [int]) -ge 0 -and ($newWeekly -as [int]) -ge 0 -and ($newRecent -as [int]) -ge 1) {
+                    $jobs[$index].RetentionMonthly = [int]$newMonthly
+                    $jobs[$index].RetentionWeekly = [int]$newWeekly
+                    $jobs[$index].RetentionRecent = [int]$newRecent
+                    Write-Host "`nRetention updated!" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "`nInvalid values! Recent must be at least 1." -ForegroundColor Red
+                }
             }
             else {
-                Write-Host "`nInvalid retention value!" -ForegroundColor Red
+                Write-Host "Current: $($job.Retention) copies" -ForegroundColor Gray
+                $newRetention = Read-Host "Enter new retention (number of copies to keep)"
+                if (($newRetention -as [int]) -and [int]$newRetention -gt 0) {
+                    $jobs[$index].Retention = [int]$newRetention
+                    Write-Host "`nRetention updated!" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "`nInvalid retention value!" -ForegroundColor Red
+                }
             }
         }
         "2" {
-            $newFrequency = Read-Host "Enter new frequency (hours, 1-24)"
-            $newStartHour = Read-Host "Enter new start hour (0-23)"
+            Write-Host ""
+            Write-Host "Current: Every $($job.Frequency) hour(s), starting at $($job.StartHour):00" -ForegroundColor Gray
+            $newFrequency = Read-Host "Frequency in hours (1-24) [$($job.Frequency)]"
+            $newStartHour = Read-Host "Start hour (0-23) [$($job.StartHour)]"
 
-            if (($newFrequency -as [int]) -and [int]$newFrequency -ge 1 -and [int]$newFrequency -le 24 -and
-                ($newStartHour -as [int]) -and [int]$newStartHour -ge 0 -and [int]$newStartHour -le 23) {
+            if ([string]::IsNullOrWhiteSpace($newFrequency)) { $newFrequency = $job.Frequency }
+            if ([string]::IsNullOrWhiteSpace($newStartHour)) { $newStartHour = $job.StartHour }
+
+            if (($newFrequency -as [int]) -ge 1 -and ($newFrequency -as [int]) -le 24 -and
+                ($newStartHour -as [int]) -ge 0 -and ($newStartHour -as [int]) -le 23) {
 
                 $jobs[$index].Frequency = [int]$newFrequency
                 $jobs[$index].StartHour = [int]$newStartHour
 
                 # Recreate scheduled task
+                Write-Host "Updating scheduled task..." -ForegroundColor Gray
                 if (New-ScheduledBackupTask -Job $jobs[$index]) {
-                    Write-Host "`nFrequency updated and scheduled task recreated!" -ForegroundColor Green
+                    Write-Host "`nSchedule updated!" -ForegroundColor Green
                 }
             }
             else {
@@ -1359,26 +1428,46 @@ function Edit-BackupJob {
             }
         }
         "3" {
-            $jobs[$index].Enabled = -not $jobs[$index].Enabled
+            $jobs[$index].Enabled = -not ($jobs[$index].Enabled -ne $false)
             $status = if ($jobs[$index].Enabled) { "enabled" } else { "disabled" }
 
             # Enable or disable the scheduled task
             try {
+                $taskName = if ($job.TaskName) { $job.TaskName } else { "VLABS_Backup_$($job.JobName)" }
                 if ($jobs[$index].Enabled) {
-                    Enable-ScheduledTask -TaskName $job.TaskName -ErrorAction Stop | Out-Null
+                    Enable-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
                 }
                 else {
-                    Disable-ScheduledTask -TaskName $job.TaskName -ErrorAction Stop | Out-Null
+                    Disable-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
                 }
                 Write-Host "`nJob $status!" -ForegroundColor Green
                 Write-Log "Job $($job.JobName) $status" -Level INFO
             }
             catch {
-                Write-Host "`nError updating scheduled task: $_" -ForegroundColor Red
+                Write-Host "`nJob $status in config, but scheduled task error: $_" -ForegroundColor Yellow
             }
         }
         "4" {
-            Read-Host "`nPress Enter to continue"
+            Write-Host ""
+            Write-Host "Current source: $($job.BackupObject)" -ForegroundColor Gray
+            $newPath = Read-Host "Enter new source path"
+            
+            if (-not [string]::IsNullOrWhiteSpace($newPath)) {
+                if (Test-Path $newPath) {
+                    $jobs[$index].BackupObject = $newPath
+                    Write-Host "`nSource path updated!" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "`nWarning: Path does not exist!" -ForegroundColor Yellow
+                    $confirm = Read-Host "Save anyway? (yes/no)"
+                    if ($confirm -eq "yes") {
+                        $jobs[$index].BackupObject = $newPath
+                        Write-Host "`nSource path updated!" -ForegroundColor Green
+                    }
+                }
+            }
+        }
+        "0" {
             return
         }
         default {
@@ -1386,9 +1475,14 @@ function Edit-BackupJob {
         }
     }
 
-    if ($choice -in @("1", "2", "3")) {
+    if ($choice -in @("1", "2", "3", "4")) {
         if (Save-Jobs -Jobs $jobs) {
             Write-Log "Updated job: $($job.JobName)" -Level SUCCESS
+            
+            # Publish updated status
+            if (Get-Command 'Publish-NodeStatus' -ErrorAction SilentlyContinue) {
+                Publish-NodeStatus | Out-Null
+            }
         }
     }
 
@@ -1409,12 +1503,18 @@ function Remove-BackupJob {
         return
     }
 
-    # Display jobs
+    # Display jobs with details
+    Write-Host "Available Jobs:" -ForegroundColor Yellow
+    Write-Host ""
     for ($i = 0; $i -lt $jobs.Count; $i++) {
-        Write-Host "[$($i + 1)] $($jobs[$i].JobName)" -ForegroundColor Yellow
+        $j = $jobs[$i]
+        $status = if ($j.Enabled -eq $false) { "[DISABLED]" } else { "" }
+        Write-Host "  [$($i + 1)] $($j.JobName) $status" -ForegroundColor $(if($j.Enabled -eq $false){"Gray"}else{"White"})
+        Write-Host "      Type: $($j.BackupType) | Source: $(Split-Path $j.BackupObject -Leaf)" -ForegroundColor Gray
     }
 
-    $selection = Read-Host "`nSelect job number to delete (or 0 to cancel)"
+    Write-Host ""
+    $selection = Read-Host "Select job number to delete (or 0 to cancel)"
     $index = [int]$selection - 1
 
     if ($selection -eq "0" -or $index -lt 0 -or $index -ge $jobs.Count) {
@@ -1423,28 +1523,57 @@ function Remove-BackupJob {
 
     $job = $jobs[$index]
 
-    $confirm = Read-Host "`nAre you sure you want to delete '$($job.JobName)'? (yes/no)"
-    if ($confirm -eq "yes") {
+    # Show what will be deleted
+    Write-Host ""
+    Write-Host "Job to delete:" -ForegroundColor Red
+    Write-Host "  Name:   $($job.JobName)" -ForegroundColor White
+    Write-Host "  Type:   $($job.BackupType)" -ForegroundColor White
+    Write-Host "  Source: $($job.BackupObject)" -ForegroundColor White
+    if ($job.PeerDestinations) {
+        Write-Host "  Peers:  $($job.PeerDestinations.Count) destination(s)" -ForegroundColor White
+    }
+    Write-Host ""
+    Write-Host "WARNING: This will remove the job configuration and scheduled task." -ForegroundColor Yellow
+    Write-Host "         Backup copies on peers will NOT be deleted." -ForegroundColor Yellow
+    Write-Host ""
+
+    $confirm = Read-Host "Type 'DELETE' to confirm"
+    if ($confirm -eq "DELETE") {
+        # Determine task name
+        $taskName = if ($job.TaskName) { $job.TaskName } else { "VLABS_Backup_$($job.JobName)" }
+        
         # Remove scheduled task
         try {
-            $task = Get-ScheduledTask -TaskName $job.TaskName -ErrorAction SilentlyContinue
+            $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
             if ($task) {
-                Unregister-ScheduledTask -TaskName $job.TaskName -Confirm:$false -ErrorAction Stop
-                Write-Log "Removed scheduled task: $($job.TaskName)" -Level SUCCESS
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+                Write-Host "Removed scheduled task: $taskName" -ForegroundColor Green
+                Write-Log "Removed scheduled task: $taskName" -Level SUCCESS
+            }
+            else {
+                Write-Host "Scheduled task not found (may have been removed manually)" -ForegroundColor Gray
             }
         }
         catch {
-            Write-Host "`nWarning: Could not remove scheduled task: $_" -ForegroundColor Yellow
+            Write-Host "Warning: Could not remove scheduled task: $_" -ForegroundColor Yellow
         }
 
         # Remove from jobs list
-        # Use @() to ensure we get an empty array, not null, if this is the last item
         $jobs = @($jobs | Where-Object { $_.JobName -ne $job.JobName })
 
         if (Save-Jobs -Jobs $jobs) {
-            Write-Host "`nJob deleted successfully!" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "Job '$($job.JobName)' deleted successfully!" -ForegroundColor Green
             Write-Log "Deleted backup job: $($job.JobName)" -Level SUCCESS
+            
+            # Publish updated status
+            if (Get-Command 'Publish-NodeStatus' -ErrorAction SilentlyContinue) {
+                Publish-NodeStatus | Out-Null
+            }
         }
+    }
+    else {
+        Write-Host "`nDeletion cancelled." -ForegroundColor Yellow
     }
 
     Read-Host "`nPress Enter to continue"
