@@ -1540,23 +1540,29 @@ function Edit-BackupJob {
             Write-Host ""
             if ($isNewFormat) {
                 Write-Host "Current: $($job.RetentionMonthly) monthly, $($job.RetentionWeekly) weekly, $($job.RetentionRecent) recent" -ForegroundColor Gray
+                Write-Host "Note: 0 = none of that type. 0,0,0 = keep only latest copy." -ForegroundColor Gray
                 Write-Host ""
-                $newMonthly = Read-Host "Monthly copies (last day of month) [$($job.RetentionMonthly)]"
-                $newWeekly = Read-Host "Weekly copies (Saturdays) [$($job.RetentionWeekly)]"
-                $newRecent = Read-Host "Recent copies [$($job.RetentionRecent)]"
+                $newMonthly = Read-Host "Monthly copies [0 = none] [$($job.RetentionMonthly)]"
+                $newWeekly = Read-Host "Weekly copies [0 = none] [$($job.RetentionWeekly)]"
+                $newRecent = Read-Host "Recent copies [0 = latest only] [$($job.RetentionRecent)]"
                 
                 if ([string]::IsNullOrWhiteSpace($newMonthly)) { $newMonthly = $job.RetentionMonthly }
                 if ([string]::IsNullOrWhiteSpace($newWeekly)) { $newWeekly = $job.RetentionWeekly }
                 if ([string]::IsNullOrWhiteSpace($newRecent)) { $newRecent = $job.RetentionRecent }
                 
-                if (($newMonthly -as [int]) -ge 0 -and ($newWeekly -as [int]) -ge 0 -and ($newRecent -as [int]) -ge 1) {
+                # All values >= 0 are valid (0,0,0 = keep only latest)
+                if (($newMonthly -as [int]) -ge 0 -and ($newWeekly -as [int]) -ge 0 -and ($newRecent -as [int]) -ge 0) {
                     $jobs[$index].RetentionMonthly = [int]$newMonthly
                     $jobs[$index].RetentionWeekly = [int]$newWeekly
                     $jobs[$index].RetentionRecent = [int]$newRecent
-                    Write-Host "`nRetention updated!" -ForegroundColor Green
+                    
+                    if ([int]$newMonthly -eq 0 -and [int]$newWeekly -eq 0 -and [int]$newRecent -eq 0) {
+                        Write-Host "`nRetention set to 0,0,0: Keep only the latest copy (no history)" -ForegroundColor Cyan
+                    }
+                    Write-Host "Retention updated!" -ForegroundColor Green
                 }
                 else {
-                    Write-Host "`nInvalid values! Recent must be at least 1." -ForegroundColor Red
+                    Write-Host "`nInvalid values! All must be non-negative numbers." -ForegroundColor Red
                 }
             }
             else {

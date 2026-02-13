@@ -338,33 +338,41 @@ function New-UnifiedBackupJob {
     Write-Host "Recent copies are the most recent backups (always created)."
     Write-Host ""
     
-    $monthlyRetention = Read-Host "Monthly copies to keep (last day of month)"
+    $monthlyRetention = Read-Host "Monthly copies to keep [0 = none]"
     if (-not ($monthlyRetention -as [int]) -or [int]$monthlyRetention -lt 0) {
         Write-Host "`nError: Must be a non-negative number!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
     
-    $weeklyRetention = Read-Host "Weekly copies to keep (Saturdays)"
+    $weeklyRetention = Read-Host "Weekly copies to keep [0 = none]"
     if (-not ($weeklyRetention -as [int]) -or [int]$weeklyRetention -lt 0) {
         Write-Host "`nError: Must be a non-negative number!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
     
-    $recentRetention = Read-Host "Recent copies to keep"
-    if (-not ($recentRetention -as [int]) -or [int]$recentRetention -lt 1) {
-        Write-Host "`nError: Must be at least 1!" -ForegroundColor Red
+    $recentRetention = Read-Host "Recent copies to keep [0 = latest only]"
+    if (-not ($recentRetention -as [int]) -or [int]$recentRetention -lt 0) {
+        Write-Host "`nError: Must be a non-negative number!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
     
     $totalMaxCopies = [int]$monthlyRetention + [int]$weeklyRetention + [int]$recentRetention
+    
+    # Special case: 0,0,0 means "keep only the latest copy"
+    if ($totalMaxCopies -eq 0) {
+        Write-Host ""
+        Write-Host "Note: 0,0,0 = Keep only the latest copy (no history)" -ForegroundColor Cyan
+        $effectiveRecent = 1  # Internally ensure at least 1 survives
+    }
+    
     Write-Host ""
-    Write-Host "Maximum copies: $totalMaxCopies" -ForegroundColor Cyan
+    Write-Host "Maximum copies: $(if($totalMaxCopies -eq 0){1}else{$totalMaxCopies})" -ForegroundColor Cyan
     Write-Host "  - Up to $monthlyRetention monthly (end of month)" -ForegroundColor Gray
     Write-Host "  - Up to $weeklyRetention weekly (Saturdays)" -ForegroundColor Gray
-    Write-Host "  - Up to $recentRetention recent" -ForegroundColor Gray
+    Write-Host "  - Up to $recentRetention recent$(if($totalMaxCopies -eq 0){' (effective: 1)'}else{''})" -ForegroundColor Gray
 
     # Step 5: Frequency
     Write-Host "`n--- Step 5: Set Frequency ---" -ForegroundColor Yellow

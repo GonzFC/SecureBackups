@@ -263,6 +263,10 @@ function Invoke-RetentionCleanup {
     <#
     .SYNOPSIS
         Cleans up old backups based on retention policy
+    .DESCRIPTION
+        Retention values of 0 mean "don't keep any of this type".
+        Special case: If all three are 0, we keep exactly 1 recent copy (the latest).
+        This ensures we never delete ALL backups.
     #>
     param(
         [string]$BasePath,
@@ -272,7 +276,14 @@ function Invoke-RetentionCleanup {
         [int]$RecentRetention
     )
     
-    Write-Log "Applying retention policy: $MonthlyRetention monthly, $WeeklyRetention weekly, $RecentRetention recent" -Level INFO
+    # Safety: If all retentions are 0, keep at least 1 recent copy
+    $effectiveRecentRetention = $RecentRetention
+    if ($MonthlyRetention -eq 0 -and $WeeklyRetention -eq 0 -and $RecentRetention -eq 0) {
+        $effectiveRecentRetention = 1
+        Write-Log "Retention 0,0,0 = keeping only latest copy" -Level INFO
+    }
+    
+    Write-Log "Applying retention policy: $MonthlyRetention monthly, $WeeklyRetention weekly, $effectiveRecentRetention recent" -Level INFO
     
     if (-not (Test-Path $BasePath)) { return }
     
@@ -285,7 +296,7 @@ function Invoke-RetentionCleanup {
     $weeklyFolders = $allFolders | Where-Object { $_.Name -match '-weekly$' }
     $recentFolders = $allFolders | Where-Object { $_.Name -notmatch '-(monthly|weekly)$' }
     
-    # Delete excess monthly
+    # Delete excess monthly (0 = delete all monthly)
     if ($monthlyFolders.Count -gt $MonthlyRetention) {
         $toDelete = $monthlyFolders | Select-Object -Skip $MonthlyRetention
         foreach ($folder in $toDelete) {
@@ -294,7 +305,7 @@ function Invoke-RetentionCleanup {
         }
     }
     
-    # Delete excess weekly
+    # Delete excess weekly (0 = delete all weekly)
     if ($weeklyFolders.Count -gt $WeeklyRetention) {
         $toDelete = $weeklyFolders | Select-Object -Skip $WeeklyRetention
         foreach ($folder in $toDelete) {
@@ -303,9 +314,9 @@ function Invoke-RetentionCleanup {
         }
     }
     
-    # Delete excess recent
-    if ($recentFolders.Count -gt $RecentRetention) {
-        $toDelete = $recentFolders | Select-Object -Skip $RecentRetention
+    # Delete excess recent (uses effective retention, minimum 1 if all are 0)
+    if ($recentFolders.Count -gt $effectiveRecentRetention) {
+        $toDelete = $recentFolders | Select-Object -Skip $effectiveRecentRetention
         foreach ($folder in $toDelete) {
             Write-Log "Deleting old recent backup: $($folder.Name)" -Level INFO
             Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
