@@ -1631,34 +1631,42 @@ function Invoke-JobsValidation {
         # Handle corrupted format where jobs are wrapped in {"value": [...]}
         if ($rawContent.value -and $rawContent.value -is [Array]) {
             $jobs = @($rawContent.value)
-            $result.Issues += "Repaired corrupted jobs.json format (was wrapped in object)"
-            # Save the repaired format immediately
-            $json = ConvertTo-Json -InputObject $jobs -Depth 10
-            Set-Content -Path $jobsFile -Value $json -Force
+            $result.Issues += "Detected corrupted jobs.json format (was wrapped in object) - will repair"
+            $modified = $true
         }
         else {
             $jobs = @($rawContent)
         }
+        
+        # Debug: Log what we got
+        Write-RRDebug "Invoke-JobsValidation: Loaded $($jobs.Count) jobs from file"
     }
     catch {
         $result.Issues += "Could not parse jobs.json: $_"
         return $result
     }
     
-    # Filter out any invalid/empty jobs
-    $validJobs = @($jobs | Where-Object { $_.JobName -and $_.JobName -ne '' })
-    if ($validJobs.Count -ne $jobs.Count) {
-        $removed = $jobs.Count - $validJobs.Count
-        $result.Issues += "Removed $removed invalid job(s) with empty names"
-        $jobs = $validJobs
-        # Save cleaned jobs
-        $json = ConvertTo-Json -InputObject $jobs -Depth 10
-        Set-Content -Path $jobsFile -Value $json -Force
+    # Validate jobs have required fields (but DON'T remove them - just report)
+    $invalidJobs = @($jobs | Where-Object { -not $_.JobName -or $_.JobName -eq '' })
+    if ($invalidJobs.Count -gt 0) {
+        $result.Issues += "Found $($invalidJobs.Count) job(s) with empty names (not removed - manual review needed)"
     }
     
+    # Only proceed with valid jobs for further checks
+    $validJobs = @($jobs | Where-Object { $_.JobName -and $_.JobName -ne '' })
+    Write-RRDebug "Invoke-JobsValidation: $($validJobs.Count) valid jobs after filter"
+    
+    if ($validJobs.Count -eq 0 -and $jobs.Count -gt 0) {
+        # All jobs are invalid - this is suspicious, don't save
+        $result.Issues += "WARNING: All jobs appear invalid - NOT modifying file (manual review needed)"
+        return $result
+    }
+    
+    $jobs = $validJobs
     if ($jobs.Count -eq 0) { return $result }
     
-    $modified = $false
+    # Note: $modified may already be true from value wrapper detection above
+    if ($null -eq $modified) { $modified = $false }
     $result.JobsChecked = $jobs.Count
     
     for ($i = 0; $i -lt $jobs.Count; $i++) {
@@ -1771,10 +1779,13 @@ function Invoke-JobsValidation {
         }
     }
     
-    # Save if modified
+    # Save if modified - use -InputObject to avoid PowerShell wrapping behavior
     if ($modified) {
         try {
-            $jobs | ConvertTo-Json -Depth 10 | Set-Content $jobsFile -Force
+            Write-RRDebug "Invoke-JobsValidation: Saving $($jobs.Count) jobs (modified=$modified)"
+            $json = ConvertTo-Json -InputObject @($jobs) -Depth 10
+            Set-Content -Path $jobsFile -Value $json -Force
+            $result.Issues += "Saved repaired jobs.json"
         }
         catch {
             $result.Issues += "Could not save migrated jobs: $_"

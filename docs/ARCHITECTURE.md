@@ -1,115 +1,152 @@
-# Resilience Ring + VLABS Monitor - Architecture
+# VLABS Resilience Ring - Architecture
 
-## Overview
+*Last updated: 2026-02-13*
 
-**Resilience Ring** es un cliente Windows que sincroniza backups locales a múltiples nodos remotos vía Tailscale, creando redundancia geográfica distribuida.
+## Project Goal
 
-**VLABS Monitor** es el servidor centralizado (dentro de la misma red Tailscale) que:
-- Recibe telemetría de todos los clientes Resilience Ring
-- Presenta un dashboard unificado
-- Envía alertas por Telegram cuando se requiere acción
+**Primary Goal:** Distributed backup system where each site backs up to multiple peer sites automatically, with no single point of failure.
+
+**Business Goal:** Enable VLABS to monitor and invoice customers based on active peers per month.
+
+## Design Principles
+
+### 1. No Single Point of Failure
+- Data lives on peers, not a central server
+- RRM is just a viewer that queries live data
+- Each peer maintains its own state
+- Backups exist on at least 2 remote peers
+
+### 2. Separate Master Data from Transaction Data
+- **Master Data** (changes rarely): Job definitions, peer configuration
+- **Transaction Data** (changes frequently): Run history, status
+- Reduces corruption risk from frequent writes
+
+### 3. Self-Updating Architecture
+- One-liner install from GitHub
+- Auto-update check on startup
+- Config stored in ProgramData (survives updates)
+- Scripts stored in install directory (replaced on update)
+
+### 4. Pull-Based Discovery
+- Peers don't push config to each other
+- Discovery via Tailscale tags
+- Each peer publishes its status to its own share
+- Managers pull status from all peers on demand
 
 ## Components
 
-### 1. Resilience Ring (Cliente Windows)
-- **Ubicación:** Cada sitio del cliente
-- **Función:** Ejecutar backups programados hacia nodos hermanos
-- **Reporta a:** VLABS Monitor
+### Resilience Ring Client (RRC)
+**Purpose:** Runs on each peer. Manages backup jobs and execution.
 
-**Datos que reporta:**
-- Heartbeat periódico (estoy vivo)
-- Status de cada backup (success/failed)
-- Checksums de archivos copiados
-- Errores y excepciones
-- Métricas: tiempo de ejecución, bytes transferidos
+**Files:**
+- `ResilienceRing.ps1` - Main TUI
+- `Execute-Backup.ps1` - Scheduled task executor
+- `PeerManagement.ps1` - Peer discovery, storage setup
+- `BackupJob.ps1` - Unified job creation workflow
+- `VLABS-SecureBackup.ps1` - Legacy functions (being migrated)
+- `CryptoUtils.ps1` - AES encryption for credentials
 
-### 2. VLABS Monitor (Servidor)
-- **Ubicación:** Un nodo dentro de Tailscale (ej: gz-app26)
-- **Componentes:**
+**Data Paths:**
+- Install: `C:\VLABS_ResilienceRing\` (scripts, git repo)
+- Data: `C:\ProgramData\VLABS_ResilienceRing\` (config, logs)
 
-#### a) Collector Service
-- API REST que recibe datos de clientes
-- Almacena en SQLite/PostgreSQL
-- Endpoints:
-  - `POST /api/heartbeat` - Cliente reporta que está vivo
-  - `POST /api/backup/result` - Resultado de un backup
-  - `POST /api/backup/checksum` - Verificación de integridad
-  - `GET /api/health` - Health check del servicio
+**Data Files:**
+- `ring-config.json` - This peer's configuration
+- `jobs.json` - Backup job definitions (MASTER DATA)
+- `jobs-status.json` - Will be: execution history (TRANSACTION DATA)
+- `storage-peers.json` - Known peers in the ring
 
-#### b) Dashboard Web
-- Vista de todos los clientes registrados
-- Filtros por:
-  - Etiqueta (grupo/cliente)
-  - Dominio Tailscale
-  - Estado (healthy/warning/critical)
-- Historial de backups por nodo
-- Gráficas de tendencias
+### Resilience Ring Manager (RRM)
+**Purpose:** Multi-ring monitoring and invoicing. Runs from any Tailscale-connected machine.
 
-#### c) Alert Engine
-- Evalúa condiciones de alerta:
-  - Heartbeat no recibido en X minutos
-  - Backup fallido
-  - Checksum mismatch
-  - Espacio en disco bajo
-- **Envía alertas SOLO por Telegram** al grupo "Clawdey - VLABS Monitor"
+**Files:**
+- `ResilienceRingManager.ps1` - Main TUI
+- `install-rrm.ps1` - One-liner installer
+
+**Data Paths:**
+- Install: `C:\VLABS_ResilienceRingManager\`
+- Data: `C:\ProgramData\VLABS_RRM\`
+
+**Data Files:**
+- `rings.json` - Connected rings (local only)
+
+### Shared Storage (per peer)
+**Path:** `\\peer\RR_Backups\`
+
+**Structure:**
+```
+RR_Backups\
+├── _nodeinfo\
+│   └── jobs-status.json    # Published for RRM to read
+├── peer-info.json          # Peer metadata
+└── CUSTOMER_CODE\
+    └── Location\
+        └── Application\
+            └── type\
+                ├── App-YYYY-MM-monthly\
+                ├── App-YYYY-MM-DD-weekly\
+                └── App-YYYY-MM-DD-HHMM\
+```
 
 ## Data Flow
 
+### Backup Execution
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  Sitio A (SLP)  │     │  Sitio B (MTY)  │     │  Sitio C (GDL)  │
-│ Resilience Ring │     │ Resilience Ring │     │ Resilience Ring │
-└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
-         │                       │                       │
-         │  Tailscale (100.x.x.x network)               │
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                                 ▼
-                    ┌────────────────────────┐
-                    │     VLABS Monitor      │
-                    │  (gz-app26 / Tailscale)│
-                    ├────────────────────────┤
-                    │ • Collector Service    │
-                    │ • Dashboard Web        │
-                    │ • Alert Engine         │
-                    └───────────┬────────────┘
-                                │
-                                ▼
-                    ┌────────────────────────┐
-                    │  Telegram Group        │
-                    │  "Clawdey - VLABS Mon" │
-                    └────────────────────────┘
+Windows Scheduled Task
+    → Execute-Backup.ps1 -JobName "X"
+    → Load job from jobs.json
+    → For each PeerDestination:
+        → Connect via SMB (RR_Service account)
+        → Robocopy with retention policy
+        → Verify checksums
+    → Update jobs-status.json (transaction data)
+    → Publish to _nodeinfo/jobs-status.json
 ```
 
-## Backup Flow (con checksums)
+### RRM Statistics Query
+```
+RRM: Show Ring Statistics
+    → tailscale status --json (get peers by tag)
+    → For each peer:
+        → Connect to \\peer\RR_Backups
+        → Read _nodeinfo/jobs-status.json
+        → Read storage usage
+    → Aggregate and display
+```
 
-1. Scheduled Task dispara Execute-Backup.ps1
-2. Conecta Tailscale
-3. Monta share SMB
-4. Copia archivos con robocopy
-5. **NUEVO:** Calcula checksum SHA256 de archivos copiados
-6. **NUEVO:** Verifica checksum en destino
-7. **NUEVO:** Reporta resultado + checksum a VLABS Monitor
-8. Aplica retención
-9. Desconecta
+## Security Model
 
-## Security Notes
+- **Transport:** Tailscale (WireGuard encrypted)
+- **SMB Auth:** RR_Service account with deterministic password from CustomerCode
+- **Credentials:** AES-256 encrypted using machine GUID
+- **At Rest:** Not encrypted (same legal entity owns all nodes)
 
-- Todo el tráfico va por Tailscale (WireGuard encrypted)
-- Credenciales SMB encriptadas con DPAPI (por máquina/usuario)
-- Sin encriptación en reposo (misma entidad legal dueña de todos los nodos)
-- VLABS Monitor solo accesible dentro de Tailscale
+## Retention Policy
 
-## Telegram Alerts
+| Type | When Created | Naming |
+|------|--------------|--------|
+| Monthly | Last day of month | `App-YYYY-MM-monthly` |
+| Weekly | Saturdays | `App-YYYY-MM-DD-weekly` |
+| Recent | Every run | `App-YYYY-MM-DD-HHMM` |
 
-**Grupo:** Clawdey - VLABS Monitor
+## Version History
 
-**Tipos de alerta:**
-- 🔴 CRITICAL: Backup fallido, checksum mismatch
-- 🟡 WARNING: Heartbeat retrasado, espacio bajo
-- 🟢 INFO: Backup completado (opcional, configurable)
+- **v1.8.x** - Unified backup jobs, startup validation
+- **v1.7.x** - Separated install/data paths, Tailscale names
+- **v1.6.x** - Location field, path structure
+- **v1.4.x-1.5.x** - Storage peers with Tailscale tag filtering
+- **RRM v1.1.x** - Multi-ring monitoring, job listing
 
----
-*Documento creado: 2026-02-11*
-*Autores: Gonzalo + Clawdey*
+## Known Issues & Lessons Learned
+
+### PowerShell JSON Handling
+- `ConvertFrom-Json` + `@()` can produce unexpected results
+- `ConvertTo-Json` via pipe can wrap arrays in objects
+- Always use `-InputObject` parameter, not piping
+- Always verify array contents after loading
+
+### File Corruption Prevention
+- Never save in multiple places in same function
+- Validate data BEFORE saving, not after
+- Log what you're about to save
+- Consider backup before overwrite
