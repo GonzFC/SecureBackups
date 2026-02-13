@@ -25,7 +25,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.1.1'
+$script:AppVersion = '1.1.2'
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -790,29 +790,16 @@ function Show-RingStatistics {
             default { "Yellow" }
         }
         
-        # Good Backups: successful/total jobs
+        # Good Backups: successful/total jobs on this peer
         $goodBackups = "$($peer.SuccessfulJobs)/$($peer.TotalJobs)"
         $goodBackupsColor = if ($peer.TotalJobs -eq 0) { "Gray" } 
                            elseif ($peer.SuccessfulJobs -eq $peer.TotalJobs) { "Green" } 
                            else { "Yellow" }
         
-        # Locations: count of locations with healthy backups OF this peer (as client)
-        # For each successful job, count how many peer destinations it backs up to
-        $healthyLocations = 0
-        $totalLocations = 0
-        foreach ($job in $peer.Jobs) {
-            if ($job.PeerDestinations) {
-                $destCount = $job.PeerDestinations.Count
-                $totalLocations += $destCount
-                if ($job.LastStatus -eq 'Success') {
-                    $healthyLocations += $destCount
-                }
-            }
-        }
-        $locationsDisplay = if ($totalLocations -gt 0) { "$healthyLocations/$totalLocations" } else { "-" }
-        $locationsColor = if ($totalLocations -eq 0) { "Gray" } 
-                         elseif ($healthyLocations -eq $totalLocations) { "Green" } 
-                         else { "Yellow" }
+        # Locations: count of locations with backups stored ON this peer (as repository)
+        # This shows how many different locations' data this peer is holding
+        $locationsDisplay = "$($peer.LocationCount)"
+        $locationsColor = if ($peer.LocationCount -gt 0) { "Cyan" } else { "Gray" }
 
         Write-Host ("  {0,-21} | {1,-16} | " -f
             $peer.Hostname.Substring(0, [Math]::Min(21, $peer.Hostname.Length)),
