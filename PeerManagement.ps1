@@ -1697,11 +1697,13 @@ function Invoke-JobsValidation {
     try {
         $rawContent = Get-Content $jobsFile -Raw | ConvertFrom-Json
         
-        # Handle corrupted format where jobs are wrapped in {"value": [...]}
-        if ($rawContent.value -and $rawContent.value -is [Array]) {
+        # Handle corrupted format where jobs are wrapped in {"value": [...], "Count": N}
+        # This happens when PowerShell's ConvertTo-Json pipes an array
+        if ($rawContent -is [PSCustomObject] -and $rawContent.PSObject.Properties.Name -contains 'value') {
             $jobs = @($rawContent.value)
             $result.Issues += "Detected corrupted jobs.json format (was wrapped in object) - will repair"
             $modified = $true
+            Write-RRDebug "Invoke-JobsValidation: Extracted $($jobs.Count) jobs from 'value' property"
         }
         else {
             $jobs = @($rawContent)
@@ -1709,25 +1711,64 @@ function Invoke-JobsValidation {
         
         # Debug: Log what we got
         Write-RRDebug "Invoke-JobsValidation: Loaded $($jobs.Count) jobs from file"
+        
+        # Debug: Log first job structure to help diagnose issues
+        if ($jobs.Count -gt 0) {
+            $firstJob = $jobs[0]
+            $props = if ($firstJob -is [PSCustomObject]) { 
+                ($firstJob.PSObject.Properties | ForEach-Object { $_.Name }) -join ', '
+            } else { 
+                "Not PSCustomObject: $($firstJob.GetType().Name)" 
+            }
+            Write-RRDebug "Invoke-JobsValidation: First job properties: $props"
+            Write-RRDebug "Invoke-JobsValidation: First job JobName = '$($firstJob.JobName)'"
+        }
     }
     catch {
         $result.Issues += "Could not parse jobs.json: $_"
         return $result
     }
     
-    # Validate jobs have required fields (but DON'T remove them - just report)
-    $invalidJobs = @($jobs | Where-Object { -not $_.JobName -or $_.JobName -eq '' })
-    if ($invalidJobs.Count -gt 0) {
-        $result.Issues += "Found $($invalidJobs.Count) job(s) with empty names (not removed - manual review needed)"
+    # Validate jobs have required fields
+    # Use more robust check for JobName property existence
+    $validJobs = @()
+    $invalidCount = 0
+    
+    foreach ($job in $jobs) {
+        $jobName = $null
+        
+        # Try to get JobName in multiple ways (PSCustomObject vs hashtable)
+        if ($job -is [PSCustomObject] -and $job.PSObject.Properties.Name -contains 'JobName') {
+            $jobName = $job.JobName
+        }
+        elseif ($job -is [hashtable] -and $job.ContainsKey('JobName')) {
+            $jobName = $job['JobName']
+        }
+        
+        if ($jobName -and $jobName -ne '') {
+            $validJobs += $job
+        }
+        else {
+            $invalidCount++
+            Write-RRDebug "Invoke-JobsValidation: Invalid job found - JobName is empty or missing"
+        }
     }
     
-    # Only proceed with valid jobs for further checks
-    $validJobs = @($jobs | Where-Object { $_.JobName -and $_.JobName -ne '' })
+    if ($invalidCount -gt 0) {
+        $result.Issues += "Found $invalidCount job(s) with empty names (not removed - manual review needed)"
+    }
+    
     Write-RRDebug "Invoke-JobsValidation: $($validJobs.Count) valid jobs after filter"
     
     if ($validJobs.Count -eq 0 -and $jobs.Count -gt 0) {
         # All jobs are invalid - this is suspicious, don't save
         $result.Issues += "WARNING: All jobs appear invalid - NOT modifying file (manual review needed)"
+        # Write debug file to help diagnose
+        try {
+            $debugFile = Join-Path (Get-RRDataPath) "jobs-debug.json"
+            $rawContent | ConvertTo-Json -Depth 10 | Set-Content $debugFile -Force
+            $result.Issues += "Debug: Wrote raw content to jobs-debug.json for analysis"
+        } catch { }
         return $result
     }
     

@@ -27,11 +27,18 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.8.12'
 $script:AppName = 'VLABS Resilience Ring'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
 $script:RepoBranch = 'main'
+
+# Read version from version.txt (single source of truth)
+$versionFile = Join-Path $PSScriptRoot "version.txt"
+if (Test-Path $versionFile) {
+    $script:AppVersion = (Get-Content $versionFile -Raw).Trim()
+} else {
+    $script:AppVersion = '0.0.0'  # Fallback if version.txt missing
+}
 
 # Paths - Data in ProgramData (separate from git install directory)
 # This prevents git reset --hard from deleting config files during updates
