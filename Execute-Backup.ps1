@@ -15,7 +15,8 @@ param(
 
 # Configuration - Data in ProgramData (separate from git install directory)
 $script:ConfigPath = "C:\ProgramData\VLABS_ResilienceRing"
-$script:JobsFile = Join-Path $ConfigPath "jobs.json"
+$script:JobsFile = Join-Path $ConfigPath "jobs.json"           # Master data (config)
+$script:JobsStatusFile = Join-Path $ConfigPath "jobs-status.json"  # Transaction data (run history)
 $script:LogPath = Join-Path $ConfigPath "Logs"
 
 # Load helper modules
@@ -54,15 +55,25 @@ function Write-Log {
 
 #endregion
 
-#region Configuration
+#region Configuration - Master/Transaction Data Separation
+# DESIGN PRINCIPLE: Separate master data (config) from transaction data (status/history)
+# - jobs.json: Master data that rarely changes (JobName, BackupType, paths, retention, schedule)
+# - jobs-status.json: Transaction data that changes frequently (LastRun, LastStatus, etc.)
 
 function Get-Jobs {
+    <#
+    .SYNOPSIS
+        Load jobs from master data file (jobs.json)
+    .DESCRIPTION
+        Returns only the job configuration (master data).
+        Status information is stored separately in jobs-status.json.
+    #>
     try {
         if (-not (Test-Path $JobsFile)) { return @() }
         $content = Get-Content $JobsFile -Raw | ConvertFrom-Json
         
         # Handle corrupted format where jobs are wrapped in {"value": [...]}
-        if ($content.value -and $content.value -is [Array]) {
+        if ($content -is [PSCustomObject] -and $content.PSObject.Properties.Name -contains 'value') {
             $content = $content.value
         }
         
@@ -75,19 +86,90 @@ function Get-Jobs {
 }
 
 function Save-Jobs {
+    <#
+    .SYNOPSIS
+        Save jobs to master data file (jobs.json)
+    .DESCRIPTION
+        Saves only master data. Strips any transaction properties before saving.
+    #>
     param($Jobs)
     try {
-        # Ensure we save a clean array, not wrapped in an object
-        $jobsArray = @($Jobs)
-        # Use ConvertTo-Json on the array directly (not piped) to avoid wrapping
-        $json = ConvertTo-Json -InputObject $jobsArray -Depth 10
+        # Strip transaction data properties before saving master data
+        $masterDataProperties = @('JobName', 'BackupType', 'BackupObject', 'TargetPeers', 
+                                   'Schedule', 'StartHour', 'Retention', 'RetentionMonthly', 
+                                   'RetentionWeekly', 'RetentionRecent', 'TaskName', 'Enabled')
+        
+        $cleanJobs = @()
+        foreach ($job in $Jobs) {
+            $cleanJob = @{}
+            foreach ($prop in $masterDataProperties) {
+                if ($null -ne $job.$prop) {
+                    $cleanJob[$prop] = $job.$prop
+                }
+            }
+            $cleanJobs += [PSCustomObject]$cleanJob
+        }
+        
+        # Use -InputObject to prevent array wrapping
+        $json = ConvertTo-Json -InputObject $cleanJobs -Depth 10
         Set-Content -Path $JobsFile -Value $json -Force
         return $true
     }
     catch { return $false }
 }
 
+function Get-JobsStatus {
+    <#
+    .SYNOPSIS
+        Load job status from transaction data file (jobs-status.json)
+    .DESCRIPTION
+        Returns a hashtable keyed by JobName with status information.
+    #>
+    try {
+        if (-not (Test-Path $JobsStatusFile)) { return @{} }
+        $content = Get-Content $JobsStatusFile -Raw | ConvertFrom-Json
+        
+        # Handle corrupted format
+        if ($content -is [PSCustomObject] -and $content.PSObject.Properties.Name -contains 'value') {
+            $content = $content.value
+        }
+        
+        # Convert to hashtable for fast lookup
+        $statusTable = @{}
+        if ($content) {
+            foreach ($status in @($content)) {
+                if ($status.JobName) {
+                    $statusTable[$status.JobName] = $status
+                }
+            }
+        }
+        return $statusTable
+    }
+    catch { return @{} }
+}
+
+function Save-JobsStatus {
+    <#
+    .SYNOPSIS
+        Save job status to transaction data file (jobs-status.json)
+    #>
+    param([hashtable]$StatusTable)
+    try {
+        $statusArray = @($StatusTable.Values)
+        $json = ConvertTo-Json -InputObject $statusArray -Depth 10
+        Set-Content -Path $JobsStatusFile -Value $json -Force
+        return $true
+    }
+    catch { return $false }
+}
+
 function Update-JobStatus {
+    <#
+    .SYNOPSIS
+        Update status for a specific job in transaction data file
+    .DESCRIPTION
+        Updates only the transaction data file, not the master data.
+    #>
     param(
         [string]$JobName, 
         [string]$Status,
@@ -95,21 +177,40 @@ function Update-JobStatus {
         [long]$SizeBytes = 0
     )
     
-    $jobs = Get-Jobs
-    if (-not $jobs) { return }
+    $statusTable = Get-JobsStatus
     
-    for ($i = 0; $i -lt $jobs.Count; $i++) {
-        if ($jobs[$i].JobName -eq $JobName) {
-            # Use Add-Member with -Force to handle both new and existing properties
-            # This works for PSCustomObjects loaded from JSON
-            $jobs[$i] | Add-Member -NotePropertyName 'LastRun' -NotePropertyValue (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") -Force
-            $jobs[$i] | Add-Member -NotePropertyName 'LastStatus' -NotePropertyValue $Status -Force
-            $jobs[$i] | Add-Member -NotePropertyName 'LastDurationSeconds' -NotePropertyValue $DurationSeconds -Force
-            $jobs[$i] | Add-Member -NotePropertyName 'LastSizeBytes' -NotePropertyValue $SizeBytes -Force
-            Save-Jobs -Jobs $jobs
-            return
+    $statusTable[$JobName] = [PSCustomObject]@{
+        JobName = $JobName
+        LastRun = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        LastStatus = $Status
+        LastDurationSeconds = $DurationSeconds
+        LastSizeBytes = $SizeBytes
+    }
+    
+    Save-JobsStatus -StatusTable $statusTable
+}
+
+function Get-JobsWithStatus {
+    <#
+    .SYNOPSIS
+        Merge master data with transaction data for display purposes
+    .DESCRIPTION
+        Returns jobs with status information attached (read-only, for display).
+    #>
+    $jobs = Get-Jobs
+    $statusTable = Get-JobsStatus
+    
+    foreach ($job in $jobs) {
+        $status = $statusTable[$job.JobName]
+        if ($status) {
+            $job | Add-Member -NotePropertyName 'LastRun' -NotePropertyValue $status.LastRun -Force
+            $job | Add-Member -NotePropertyName 'LastStatus' -NotePropertyValue $status.LastStatus -Force
+            $job | Add-Member -NotePropertyName 'LastDurationSeconds' -NotePropertyValue $status.LastDurationSeconds -Force
+            $job | Add-Member -NotePropertyName 'LastSizeBytes' -NotePropertyValue $status.LastSizeBytes -Force
         }
     }
+    
+    return $jobs
 }
 
 # Note: Publish-NodeStatus is defined in PeerManagement.ps1 (loaded above)

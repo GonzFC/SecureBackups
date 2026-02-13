@@ -16,7 +16,8 @@
 $script:ConfigPath = "C:\ProgramData\VLABS_ResilienceRing"
 $script:LegacyConfigPaths = @("C:\VLABS_SecureBackups", "C:\VLABS_ResilienceRing")
 $script:DestinationsFile = Join-Path $ConfigPath "destinations.json"
-$script:JobsFile = Join-Path $ConfigPath "jobs.json"
+$script:JobsFile = Join-Path $ConfigPath "jobs.json"           # Master data (config)
+$script:JobsStatusFile = Join-Path $ConfigPath "jobs-status.json"  # Transaction data (run history)
 $script:LogPath = Join-Path $ConfigPath "Logs"
 $script:ExecutionScript = Join-Path $PSScriptRoot "Execute-Backup.ps1"
 
@@ -229,7 +230,19 @@ function Save-Destinations {
     }
 }
 
+#region Master/Transaction Data Separation
+# DESIGN PRINCIPLE: Separate master data (config) from transaction data (status/history)
+# - jobs.json: Master data that rarely changes (JobName, BackupType, paths, retention, schedule)
+# - jobs-status.json: Transaction data that changes frequently (LastRun, LastStatus, etc.)
+
 function Get-Jobs {
+    <#
+    .SYNOPSIS
+        Load jobs from master data file (jobs.json)
+    .DESCRIPTION
+        Returns only the job configuration (master data).
+        Status information is stored separately in jobs-status.json.
+    #>
     try {
         if (-not (Test-Path $JobsFile)) { return @() }
         $content = Get-Content $JobsFile -Raw -ErrorAction Stop
@@ -242,16 +255,13 @@ function Get-Jobs {
         $result = $content | ConvertFrom-Json
 
         # Handle corrupted format where jobs are wrapped in {"value": [...]}
-        if ($result.value -and $result.value -is [Array]) {
+        if ($result -is [PSCustomObject] -and $result.PSObject.Properties.Name -contains 'value') {
             Write-Log "Detected corrupted jobs.json format, extracting from 'value' property" -Level WARNING
             $result = $result.value
         }
 
-        # Force result to be an array (PowerShell returns single objects as non-arrays)
-        if ($null -eq $result) {
-            return @()
-        }
-
+        # Force result to be an array
+        if ($null -eq $result) { return @() }
         return @($result)
     }
     catch {
@@ -261,20 +271,36 @@ function Get-Jobs {
 }
 
 function Save-Jobs {
+    <#
+    .SYNOPSIS
+        Save jobs to master data file (jobs.json)
+    .DESCRIPTION
+        Saves only master data. Strips any transaction properties before saving.
+    #>
     param([Parameter(Mandatory=$true)] $Jobs)
 
     try {
-        # Ensure we always have an array, even if empty
-        $jobsArray = @($Jobs)
-
-        # ConvertTo-Json with explicit array handling - use -InputObject to avoid wrapping
-        if ($jobsArray.Count -eq 0) {
-            # Explicitly save empty array as "[]"
+        # Strip transaction data properties before saving master data
+        $masterDataProperties = @('JobName', 'BackupType', 'BackupObject', 'TargetPeers', 
+                                   'Schedule', 'StartHour', 'Retention', 'RetentionMonthly', 
+                                   'RetentionWeekly', 'RetentionRecent', 'TaskName', 'Enabled')
+        
+        $cleanJobs = @()
+        foreach ($job in $Jobs) {
+            $cleanJob = @{}
+            foreach ($prop in $masterDataProperties) {
+                if ($null -ne $job.$prop) {
+                    $cleanJob[$prop] = $job.$prop
+                }
+            }
+            $cleanJobs += [PSCustomObject]$cleanJob
+        }
+        
+        if ($cleanJobs.Count -eq 0) {
             "[]" | Set-Content $JobsFile -ErrorAction Stop
         }
         else {
-            # Use -InputObject instead of piping to avoid PowerShell wrapping behavior
-            $json = ConvertTo-Json -InputObject $jobsArray -Depth 10
+            $json = ConvertTo-Json -InputObject $cleanJobs -Depth 10
             Set-Content -Path $JobsFile -Value $json -ErrorAction Stop
         }
         return $true
@@ -284,6 +310,118 @@ function Save-Jobs {
         return $false
     }
 }
+
+function Get-JobsStatus {
+    <#
+    .SYNOPSIS
+        Load job status from transaction data file (jobs-status.json)
+    .DESCRIPTION
+        Returns a hashtable keyed by JobName with status information.
+    #>
+    try {
+        if (-not (Test-Path $JobsStatusFile)) { return @{} }
+        $content = Get-Content $JobsStatusFile -Raw -ErrorAction Stop
+        
+        if ([string]::IsNullOrWhiteSpace($content)) { return @{} }
+        
+        $result = $content | ConvertFrom-Json
+        
+        # Handle corrupted format
+        if ($result -is [PSCustomObject] -and $result.PSObject.Properties.Name -contains 'value') {
+            $result = $result.value
+        }
+        
+        # Convert to hashtable for fast lookup
+        $statusTable = @{}
+        if ($result) {
+            foreach ($status in @($result)) {
+                if ($status.JobName) {
+                    $statusTable[$status.JobName] = $status
+                }
+            }
+        }
+        return $statusTable
+    }
+    catch {
+        Write-Log "Error reading jobs status: $_" -Level ERROR
+        return @{}
+    }
+}
+
+function Save-JobsStatus {
+    <#
+    .SYNOPSIS
+        Save job status to transaction data file (jobs-status.json)
+    #>
+    param([hashtable]$StatusTable)
+    try {
+        $statusArray = @($StatusTable.Values)
+        if ($statusArray.Count -eq 0) {
+            "[]" | Set-Content $JobsStatusFile -ErrorAction Stop
+        }
+        else {
+            $json = ConvertTo-Json -InputObject $statusArray -Depth 10
+            Set-Content -Path $JobsStatusFile -Value $json -ErrorAction Stop
+        }
+        return $true
+    }
+    catch {
+        Write-Log "Error saving jobs status: $_" -Level ERROR
+        return $false
+    }
+}
+
+function Update-JobStatus {
+    <#
+    .SYNOPSIS
+        Update status for a specific job in transaction data file
+    .DESCRIPTION
+        Updates only the transaction data file, not the master data.
+    #>
+    param(
+        [string]$JobName, 
+        [string]$Status,
+        [int]$DurationSeconds = 0,
+        [long]$SizeBytes = 0
+    )
+    
+    $statusTable = Get-JobsStatus
+    
+    $statusTable[$JobName] = [PSCustomObject]@{
+        JobName = $JobName
+        LastRun = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        LastStatus = $Status
+        LastDurationSeconds = $DurationSeconds
+        LastSizeBytes = $SizeBytes
+    }
+    
+    Save-JobsStatus -StatusTable $statusTable
+}
+
+function Get-JobsWithStatus {
+    <#
+    .SYNOPSIS
+        Merge master data with transaction data for display purposes
+    .DESCRIPTION
+        Returns jobs with status information attached (read-only, for display).
+    #>
+    $jobs = Get-Jobs
+    $statusTable = Get-JobsStatus
+    
+    foreach ($job in $jobs) {
+        $status = $statusTable[$job.JobName]
+        if ($status) {
+            $job | Add-Member -NotePropertyName 'LastRun' -NotePropertyValue $status.LastRun -Force
+            $job | Add-Member -NotePropertyName 'LastStatus' -NotePropertyValue $status.LastStatus -Force
+            $job | Add-Member -NotePropertyName 'LastDurationSeconds' -NotePropertyValue $status.LastDurationSeconds -Force
+            $job | Add-Member -NotePropertyName 'LastSizeBytes' -NotePropertyValue $status.LastSizeBytes -Force
+        }
+    }
+    
+    return $jobs
+}
+
+#endregion Master/Transaction Data Separation
 
 #endregion
 
@@ -1097,9 +1235,8 @@ function New-BackupJob {
         StartHour = [int]$startHour
         CreatedDate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
         TaskName = "VLABS_Backup_$jobName"
-        LastRun = $null
-        LastStatus = $null
         Enabled = $true
+        # Note: LastRun/LastStatus are now stored in jobs-status.json (transaction data)
     }
 
     # Save job
@@ -1202,7 +1339,8 @@ function Show-AllBackupJobs {
     Write-Host "     ALL BACKUP JOBS" -ForegroundColor Cyan
     Write-Host "===============================================`n" -ForegroundColor Cyan
 
-    $jobs = @(Get-Jobs)
+    # Use Get-JobsWithStatus to merge master data with transaction data for display
+    $jobs = @(Get-JobsWithStatus)
 
     if ($jobs.Count -eq 0) {
         Write-Host "No backup jobs configured." -ForegroundColor Yellow
@@ -1327,7 +1465,8 @@ function Edit-BackupJob {
     Write-Host "     EDIT BACKUP JOB" -ForegroundColor Cyan
     Write-Host "===============================================`n" -ForegroundColor Cyan
 
-    $jobs = @(Get-Jobs)
+    # Use Get-JobsWithStatus for display (includes LastRun/LastStatus)
+    $jobs = @(Get-JobsWithStatus)
 
     if ($jobs.Count -eq 0) {
         Write-Host "No backup jobs configured." -ForegroundColor Yellow
@@ -1615,7 +1754,8 @@ function Show-BackupStatus {
     Write-Host "     BACKUP STATUS & HISTORY" -ForegroundColor Cyan
     Write-Host "===============================================`n" -ForegroundColor Cyan
 
-    $jobs = @(Get-Jobs)
+    # Use Get-JobsWithStatus to merge master data with transaction data for display
+    $jobs = @(Get-JobsWithStatus)
 
     if ($jobs.Count -eq 0) {
         Write-Host "No backup jobs configured." -ForegroundColor Yellow

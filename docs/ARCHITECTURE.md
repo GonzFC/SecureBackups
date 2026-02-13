@@ -1,6 +1,6 @@
 # VLABS Resilience Ring - Architecture
 
-*Last updated: 2026-02-13*
+*Last updated: 2026-02-13 (v1.9.0 - Master/Transaction separation)*
 
 ## Project Goal
 
@@ -52,9 +52,12 @@
 
 **Data Files:**
 - `ring-config.json` - This peer's configuration
-- `jobs.json` - Backup job definitions (MASTER DATA)
-- `jobs-status.json` - Will be: execution history (TRANSACTION DATA)
+- `jobs.json` - Backup job definitions (MASTER DATA: JobName, BackupType, paths, retention, schedule)
+- `jobs-status.json` - Execution history (TRANSACTION DATA: LastRun, LastStatus, LastDurationSeconds, LastSizeBytes)
 - `storage-peers.json` - Known peers in the ring
+
+**Why Two Files?** (Design Principle)
+The separation of master data from transaction data reduces corruption risk. `jobs.json` is only written when configuration changes. `jobs-status.json` is written after every backup run. If the status file corrupts, configuration is safe.
 
 ### Resilience Ring Manager (RRM)
 **Purpose:** Multi-ring monitoring and invoicing. Runs from any Tailscale-connected machine.

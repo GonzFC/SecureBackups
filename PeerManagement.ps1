@@ -1600,6 +1600,69 @@ function Invoke-StartupDiscovery {
 
 #region Startup Validation
 
+function Invoke-TransactionDataMigration {
+    <#
+    .SYNOPSIS
+        Migrates transaction data (LastRun, LastStatus, etc.) from jobs.json to jobs-status.json
+    .DESCRIPTION
+        One-time migration for existing installations. Extracts transaction fields
+        from jobs.json and saves them to the separate jobs-status.json file.
+        Part of the master/transaction data separation design principle.
+    .OUTPUTS
+        Returns count of jobs migrated
+    #>
+    $dataPath = Get-RRDataPath
+    $jobsFile = Join-Path $dataPath "jobs.json"
+    $statusFile = Join-Path $dataPath "jobs-status.json"
+    
+    # Skip if status file already exists (already migrated)
+    if (Test-Path $statusFile) { return 0 }
+    
+    # Skip if no jobs file
+    if (-not (Test-Path $jobsFile)) { return 0 }
+    
+    try {
+        $rawContent = Get-Content $jobsFile -Raw | ConvertFrom-Json
+        
+        # Handle corrupted format
+        if ($rawContent -is [PSCustomObject] -and $rawContent.PSObject.Properties.Name -contains 'value') {
+            $jobs = @($rawContent.value)
+        }
+        else {
+            $jobs = @($rawContent)
+        }
+        
+        if ($jobs.Count -eq 0) { return 0 }
+        
+        # Extract transaction data
+        $statusArray = @()
+        foreach ($job in $jobs) {
+            if ($job.JobName -and ($job.LastRun -or $job.LastStatus)) {
+                $statusArray += [PSCustomObject]@{
+                    JobName = $job.JobName
+                    LastRun = $job.LastRun
+                    LastStatus = $job.LastStatus
+                    LastDurationSeconds = if ($job.LastDurationSeconds) { $job.LastDurationSeconds } else { 0 }
+                    LastSizeBytes = if ($job.LastSizeBytes) { $job.LastSizeBytes } else { 0 }
+                }
+            }
+        }
+        
+        if ($statusArray.Count -gt 0) {
+            # Save transaction data to new file
+            $json = ConvertTo-Json -InputObject $statusArray -Depth 10
+            Set-Content -Path $statusFile -Value $json -Force
+            Write-RRDebug "Migrated transaction data for $($statusArray.Count) jobs to jobs-status.json"
+        }
+        
+        return $statusArray.Count
+    }
+    catch {
+        Write-RRDebug "Transaction data migration failed: $_"
+        return 0
+    }
+}
+
 function Invoke-JobsValidation {
     <#
     .SYNOPSIS
@@ -1623,6 +1686,12 @@ function Invoke-JobsValidation {
     $jobsFile = Join-Path (Get-RRDataPath) "jobs.json"
     if (-not (Test-Path $jobsFile)) {
         return $result
+    }
+    
+    # Migrate transaction data to separate file (one-time migration)
+    $migratedCount = Invoke-TransactionDataMigration
+    if ($migratedCount -gt 0) {
+        $result.Issues += "Migrated transaction data for $migratedCount job(s) to jobs-status.json"
     }
     
     try {
@@ -1701,15 +1770,8 @@ function Invoke-JobsValidation {
             $result.JobsMigrated++
         }
         
-        # Ensure LastDurationSeconds and LastSizeBytes exist
-        if ($null -eq $job.LastDurationSeconds) {
-            $jobs[$i] | Add-Member -NotePropertyName 'LastDurationSeconds' -NotePropertyValue 0 -Force
-            $modified = $true
-        }
-        if ($null -eq $job.LastSizeBytes) {
-            $jobs[$i] | Add-Member -NotePropertyName 'LastSizeBytes' -NotePropertyValue 0 -Force
-            $modified = $true
-        }
+        # Note: LastRun, LastStatus, LastDurationSeconds, LastSizeBytes are now stored
+        # in jobs-status.json (transaction data), not in jobs.json (master data)
         
         # Check scheduled task exists
         # Ensure TaskName is a proper string (could be array if corrupted)
@@ -1779,13 +1841,32 @@ function Invoke-JobsValidation {
         }
     }
     
-    # Save if modified - use -InputObject to avoid PowerShell wrapping behavior
+    # Save if modified - strip transaction data before saving master data
     if ($modified) {
         try {
             Write-RRDebug "Invoke-JobsValidation: Saving $($jobs.Count) jobs (modified=$modified)"
-            $json = ConvertTo-Json -InputObject @($jobs) -Depth 10
+            
+            # Master data properties only (strip transaction data)
+            $masterDataProperties = @('JobName', 'AppName', 'BackupType', 'BackupObject', 'SourceLocation',
+                                       'TargetPeers', 'PeerDestinations', 'Schedule', 'Frequency', 'StartHour', 
+                                       'Retention', 'RetentionMonthly', 'RetentionWeekly', 'RetentionRecent', 
+                                       'TaskName', 'Enabled', 'Destination', 'DestinationPath', 'DestinationDomain',
+                                       'DestinationUsername', 'DestinationEncryptedPassword', 'CreatedDate')
+            
+            $cleanJobs = @()
+            foreach ($job in $jobs) {
+                $cleanJob = @{}
+                foreach ($prop in $masterDataProperties) {
+                    if ($null -ne $job.$prop) {
+                        $cleanJob[$prop] = $job.$prop
+                    }
+                }
+                $cleanJobs += [PSCustomObject]$cleanJob
+            }
+            
+            $json = ConvertTo-Json -InputObject $cleanJobs -Depth 10
             Set-Content -Path $jobsFile -Value $json -Force
-            $result.Issues += "Saved repaired jobs.json"
+            $result.Issues += "Saved repaired jobs.json (master data only)"
         }
         catch {
             $result.Issues += "Could not save migrated jobs: $_"
@@ -1835,15 +1916,50 @@ function Publish-NodeStatus {
             New-Item -Path $nodeInfoPath -ItemType Directory -Force | Out-Null
         }
         
-        # Get all jobs
-        $jobsFile = Join-Path (Get-RRDataPath) "jobs.json"
+        # Get all jobs (master data + transaction data merged)
+        $dataPath = Get-RRDataPath
+        $jobsFile = Join-Path $dataPath "jobs.json"
+        $statusFile = Join-Path $dataPath "jobs-status.json"
+        
         $jobs = @()
+        $statusTable = @{}
+        
+        # Load master data
         if (Test-Path $jobsFile) {
             try {
                 $jobsContent = Get-Content $jobsFile -Raw | ConvertFrom-Json
+                # Handle corrupted format
+                if ($jobsContent -is [PSCustomObject] -and $jobsContent.PSObject.Properties.Name -contains 'value') {
+                    $jobsContent = $jobsContent.value
+                }
                 if ($jobsContent) { $jobs = @($jobsContent) }
             }
             catch { }
+        }
+        
+        # Load transaction data
+        if (Test-Path $statusFile) {
+            try {
+                $statusContent = Get-Content $statusFile -Raw | ConvertFrom-Json
+                if ($statusContent -is [PSCustomObject] -and $statusContent.PSObject.Properties.Name -contains 'value') {
+                    $statusContent = $statusContent.value
+                }
+                foreach ($s in @($statusContent)) {
+                    if ($s.JobName) { $statusTable[$s.JobName] = $s }
+                }
+            }
+            catch { }
+        }
+        
+        # Merge status into jobs
+        foreach ($job in $jobs) {
+            $status = $statusTable[$job.JobName]
+            if ($status) {
+                $job | Add-Member -NotePropertyName 'LastRun' -NotePropertyValue $status.LastRun -Force
+                $job | Add-Member -NotePropertyName 'LastStatus' -NotePropertyValue $status.LastStatus -Force
+                $job | Add-Member -NotePropertyName 'LastDurationSeconds' -NotePropertyValue $status.LastDurationSeconds -Force
+                $job | Add-Member -NotePropertyName 'LastSizeBytes' -NotePropertyValue $status.LastSizeBytes -Force
+            }
         }
         
         # Get Tailscale hostname
