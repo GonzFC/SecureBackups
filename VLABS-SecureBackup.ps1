@@ -231,11 +231,18 @@ function Save-Destinations {
 
 function Get-Jobs {
     try {
+        if (-not (Test-Path $JobsFile)) { return @() }
         $content = Get-Content $JobsFile -Raw -ErrorAction Stop
         $result = $content | ConvertFrom-Json
 
+        # Handle corrupted format where jobs are wrapped in {"value": [...]}
+        if ($result.value -and $result.value -is [Array]) {
+            Write-Log "Detected corrupted jobs.json format, extracting from 'value' property" -Level WARNING
+            $result = $result.value
+        }
+
         # Force result to be an array (PowerShell returns single objects as non-arrays)
-        if ($result -eq $null) {
+        if ($null -eq $result) {
             return @()
         }
 
@@ -255,13 +262,15 @@ function Save-Jobs {
         # Ensure we always have an array, even if empty
         $jobsArray = @($Jobs)
 
-        # ConvertTo-Json with explicit array handling
+        # ConvertTo-Json with explicit array handling - use -InputObject to avoid wrapping
         if ($jobsArray.Count -eq 0) {
             # Explicitly save empty array as "[]"
             "[]" | Set-Content $JobsFile -ErrorAction Stop
         }
         else {
-            $jobsArray | ConvertTo-Json -Depth 10 | Set-Content $JobsFile -ErrorAction Stop
+            # Use -InputObject instead of piping to avoid PowerShell wrapping behavior
+            $json = ConvertTo-Json -InputObject $jobsArray -Depth 10
+            Set-Content -Path $JobsFile -Value $json -ErrorAction Stop
         }
         return $true
     }

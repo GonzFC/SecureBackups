@@ -1626,11 +1626,34 @@ function Invoke-JobsValidation {
     }
     
     try {
-        $jobs = @(Get-Content $jobsFile -Raw | ConvertFrom-Json)
+        $rawContent = Get-Content $jobsFile -Raw | ConvertFrom-Json
+        
+        # Handle corrupted format where jobs are wrapped in {"value": [...]}
+        if ($rawContent.value -and $rawContent.value -is [Array]) {
+            $jobs = @($rawContent.value)
+            $result.Issues += "Repaired corrupted jobs.json format (was wrapped in object)"
+            # Save the repaired format immediately
+            $json = ConvertTo-Json -InputObject $jobs -Depth 10
+            Set-Content -Path $jobsFile -Value $json -Force
+        }
+        else {
+            $jobs = @($rawContent)
+        }
     }
     catch {
         $result.Issues += "Could not parse jobs.json: $_"
         return $result
+    }
+    
+    # Filter out any invalid/empty jobs
+    $validJobs = @($jobs | Where-Object { $_.JobName -and $_.JobName -ne '' })
+    if ($validJobs.Count -ne $jobs.Count) {
+        $removed = $jobs.Count - $validJobs.Count
+        $result.Issues += "Removed $removed invalid job(s) with empty names"
+        $jobs = $validJobs
+        # Save cleaned jobs
+        $json = ConvertTo-Json -InputObject $jobs -Depth 10
+        Set-Content -Path $jobsFile -Value $json -Force
     }
     
     if ($jobs.Count -eq 0) { return $result }
@@ -1641,11 +1664,20 @@ function Invoke-JobsValidation {
     for ($i = 0; $i -lt $jobs.Count; $i++) {
         $job = $jobs[$i]
         
-        # Ensure TaskName exists
+        # Ensure TaskName exists and matches JobName
+        $expectedTaskName = "VLABS_Backup_$($job.JobName)"
         if (-not $job.TaskName) {
-            $jobs[$i] | Add-Member -NotePropertyName 'TaskName' -NotePropertyValue "VLABS_Backup_$($job.JobName)" -Force
+            $jobs[$i] | Add-Member -NotePropertyName 'TaskName' -NotePropertyValue $expectedTaskName -Force
             $modified = $true
             $result.JobsMigrated++
+        }
+        elseif ($job.TaskName -ne $expectedTaskName) {
+            # TaskName doesn't match JobName - this is corruption, fix it
+            $oldTaskName = $job.TaskName
+            $jobs[$i] | Add-Member -NotePropertyName 'TaskName' -NotePropertyValue $expectedTaskName -Force
+            $modified = $true
+            $result.JobsMigrated++
+            # Note: The old task will be reported as orphaned and can be manually removed
         }
         
         # Ensure Enabled field exists

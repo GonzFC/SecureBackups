@@ -58,17 +58,30 @@ function Write-Log {
 
 function Get-Jobs {
     try {
-        if (-not (Test-Path $JobsFile)) { return $null }
+        if (-not (Test-Path $JobsFile)) { return @() }
         $content = Get-Content $JobsFile -Raw | ConvertFrom-Json
-        return @($content)
+        
+        # Handle corrupted format where jobs are wrapped in {"value": [...]}
+        if ($content.value -and $content.value -is [Array]) {
+            $content = $content.value
+        }
+        
+        # Ensure we return an array
+        if ($null -eq $content) { return @() }
+        if ($content -isnot [Array]) { return @($content) }
+        return $content
     }
-    catch { return $null }
+    catch { return @() }
 }
 
 function Save-Jobs {
     param($Jobs)
     try {
-        $Jobs | ConvertTo-Json -Depth 10 | Set-Content $JobsFile -Force
+        # Ensure we save a clean array, not wrapped in an object
+        $jobsArray = @($Jobs)
+        # Use ConvertTo-Json on the array directly (not piped) to avoid wrapping
+        $json = ConvertTo-Json -InputObject $jobsArray -Depth 10
+        Set-Content -Path $JobsFile -Value $json -Force
         return $true
     }
     catch { return $false }
