@@ -1198,6 +1198,9 @@ function Show-AllBackupJobs {
     Write-Host "===============================================`n" -ForegroundColor Cyan
 
     $jobs = @(Get-Jobs)
+    
+    # Debug: Show what we got
+    Write-Host "DEBUG: Got $($jobs.Count) job(s), Type: $($jobs.GetType().Name)" -ForegroundColor Magenta
 
     if ($jobs.Count -eq 0) {
         Write-Host "No backup jobs configured." -ForegroundColor Yellow
@@ -1207,6 +1210,10 @@ function Show-AllBackupJobs {
 
     for ($i = 0; $i -lt $jobs.Count; $i++) {
         $job = $jobs[$i]
+        
+        # Debug: Show job type and properties
+        Write-Host "DEBUG Job[$i]: Type=$($job.GetType().Name), JobName='$($job.JobName)', BackupType='$($job.BackupType)'" -ForegroundColor Magenta
+        
         $typeMap = @{ "F" = "File"; "D" = "Directory"; "SQL" = "SQL Database" }
 
         Write-Host "[$($i + 1)] " -NoNewline -ForegroundColor Yellow
@@ -1219,10 +1226,26 @@ function Show-AllBackupJobs {
             Write-Host ""
         }
 
-        Write-Host "    Type: $($typeMap[$job.BackupType])" -ForegroundColor Gray
+        # Handle both new format (PeerDestinations) and legacy format (Destination/DestinationPath)
+        $backupTypeDisplay = if ($job.BackupType) { $typeMap[$job.BackupType] } else { "Unknown" }
+        Write-Host "    Type: $backupTypeDisplay" -ForegroundColor Gray
         Write-Host "    Source: $($job.BackupObject)" -ForegroundColor Gray
-        Write-Host "    Destination: $($job.Destination) ($($job.DestinationPath))" -ForegroundColor Gray
-        Write-Host "    Retention: $($job.Retention) copies" -ForegroundColor Gray
+        
+        if ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) {
+            Write-Host "    Peers: $($job.PeerDestinations.Count) destination(s)" -ForegroundColor Gray
+        }
+        elseif ($job.DestinationPath) {
+            Write-Host "    Destination: $($job.Destination) ($($job.DestinationPath))" -ForegroundColor Gray
+        }
+        
+        # Handle both new retention format and legacy
+        if ($job.RetentionMonthly -or $job.RetentionWeekly -or $job.RetentionRecent) {
+            Write-Host "    Retention: $($job.RetentionMonthly) monthly, $($job.RetentionWeekly) weekly, $($job.RetentionRecent) recent" -ForegroundColor Gray
+        }
+        elseif ($job.Retention) {
+            Write-Host "    Retention: $($job.Retention) copies" -ForegroundColor Gray
+        }
+        
         Write-Host "    Frequency: Every $($job.Frequency) hour(s), starting at $($job.StartHour):00" -ForegroundColor Gray
 
         if ($job.LastRun) {
