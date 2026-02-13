@@ -9,10 +9,67 @@
     - Smart peer selection (auto-distributes to 2+ peers)
     - Retention policies (monthly, weekly, recent)
     - Automatic folder management
+    - Ring policies enforcement
     
 .NOTES
     Part of VLABS Resilience Ring
 #>
+
+#region Ring Policies
+
+function Get-RingPolicies {
+    <#
+    .SYNOPSIS
+        Reads ring policies from local _nodeinfo/ring-policies.json
+    .DESCRIPTION
+        Returns policies set by RRM, or defaults if not available.
+        Policies are published by RRM and enforced after successful backups.
+    #>
+    
+    # Default policies (used if no ring policies file exists)
+    $defaults = @{
+        RetentionMonthlyMin = 0
+        RetentionMonthlyMax = 3
+        RetentionWeeklyMin = 0
+        RetentionWeeklyMax = 4
+        RetentionRecentMin = 1
+        RetentionRecentMax = 6
+    }
+    
+    try {
+        # Get local storage path from ring config
+        $config = Get-RingConfig
+        if (-not $config -or -not $config.StoragePath) {
+            return [PSCustomObject]$defaults
+        }
+        
+        $policyFile = Join-Path $config.StoragePath "_nodeinfo\ring-policies.json"
+        if (-not (Test-Path $policyFile)) {
+            return [PSCustomObject]$defaults
+        }
+        
+        $policyData = Get-Content $policyFile -Raw | ConvertFrom-Json
+        if ($policyData.Policies) {
+            # Merge with defaults (in case new fields added)
+            $result = @{}
+            foreach ($key in $defaults.Keys) {
+                $result[$key] = if ($null -ne $policyData.Policies.$key) { 
+                    $policyData.Policies.$key 
+                } else { 
+                    $defaults[$key] 
+                }
+            }
+            return [PSCustomObject]$result
+        }
+    }
+    catch {
+        # Fall back to defaults on any error
+    }
+    
+    return [PSCustomObject]$defaults
+}
+
+#endregion
 
 #region Peer Selection
 
@@ -338,10 +395,11 @@ function New-UnifiedBackupJob {
     Write-Host "Recent copies are the most recent backups (always created)."
     Write-Host ""
     
-    # Retention limits (can be overridden by Ring Policies in future)
-    $monthlyMin = 0; $monthlyMax = 3
-    $weeklyMin = 0; $weeklyMax = 4
-    $recentMin = 1; $recentMax = 6
+    # Get retention limits from ring policies (set by RRM)
+    $policies = Get-RingPolicies
+    $monthlyMin = $policies.RetentionMonthlyMin; $monthlyMax = $policies.RetentionMonthlyMax
+    $weeklyMin = $policies.RetentionWeeklyMin; $weeklyMax = $policies.RetentionWeeklyMax
+    $recentMin = $policies.RetentionRecentMin; $recentMax = $policies.RetentionRecentMax
     
     $monthlyRetention = Read-Host "Monthly copies to keep (0-$monthlyMax)"
     if (-not ($monthlyRetention -as [int]) -or [int]$monthlyRetention -lt $monthlyMin -or [int]$monthlyRetention -gt $monthlyMax) {

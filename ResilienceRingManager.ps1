@@ -25,7 +25,13 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.1.2'
+# Read version from rrm-version.txt (single source of truth)
+$versionFile = Join-Path $PSScriptRoot "rrm-version.txt"
+if (Test-Path $versionFile) {
+    $script:AppVersion = (Get-Content $versionFile -Raw).Trim()
+} else {
+    $script:AppVersion = '0.0.0'
+}
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -1172,6 +1178,269 @@ function Invoke-RingRescan {
     Read-Host "`nPress Enter to continue"
 }
 
+function Show-RingPolicies {
+    <#
+    .SYNOPSIS
+        Manage retention policies for the active ring
+    #>
+    if (-not $script:ActiveRing) {
+        Write-Host "No ring selected!" -ForegroundColor Red
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    while ($true) {
+        Clear-Host
+        Write-Host "`n========================================" -ForegroundColor Cyan
+        Write-Host "     RING POLICIES" -ForegroundColor Cyan
+        Write-Host "     $($script:ActiveRing.Name)" -ForegroundColor Cyan
+        Write-Host "========================================`n" -ForegroundColor Cyan
+
+        # Get current policies (or defaults)
+        $policies = Get-RingPolicies -Ring $script:ActiveRing
+        
+        Write-Host "RETENTION LIMITS" -ForegroundColor Yellow
+        Write-Host "These limits apply to all backup jobs in this ring." -ForegroundColor Gray
+        Write-Host "Clients auto-correct to these limits after successful backups." -ForegroundColor Gray
+        Write-Host ""
+        
+        Write-Host "Category     Min   Max   Description" -ForegroundColor Cyan
+        Write-Host "--------     ---   ---   -----------" -ForegroundColor Gray
+        Write-Host "Monthly      $($policies.RetentionMonthlyMin.ToString().PadLeft(3))   $($policies.RetentionMonthlyMax.ToString().PadLeft(3))   End of month copies" -ForegroundColor White
+        Write-Host "Weekly       $($policies.RetentionWeeklyMin.ToString().PadLeft(3))   $($policies.RetentionWeeklyMax.ToString().PadLeft(3))   Saturday copies" -ForegroundColor White
+        Write-Host "Recent       $($policies.RetentionRecentMin.ToString().PadLeft(3))   $($policies.RetentionRecentMax.ToString().PadLeft(3))   Rolling backups (min always 1)" -ForegroundColor White
+        
+        Write-Host ""
+        Write-Host "OPTIONS" -ForegroundColor Yellow
+        Write-Host "  1. Edit Retention Limits" -ForegroundColor White
+        Write-Host "  2. Publish Policies to All Peers" -ForegroundColor White
+        Write-Host "  0. Back to Main Menu" -ForegroundColor White
+        Write-Host ""
+        
+        $choice = Read-Host "Enter your choice"
+        
+        switch ($choice) {
+            "1" { Edit-RingPolicies }
+            "2" { Publish-RingPoliciesToPeers }
+            "0" { return }
+            default { Write-Host "Invalid choice!" -ForegroundColor Red; Start-Sleep -Seconds 1 }
+        }
+    }
+}
+
+function Get-RingPolicies {
+    <#
+    .SYNOPSIS
+        Gets policies for a ring, or returns defaults
+    #>
+    param($Ring)
+    
+    # Default policies
+    $defaults = @{
+        RetentionMonthlyMin = 0
+        RetentionMonthlyMax = 3
+        RetentionWeeklyMin = 0
+        RetentionWeeklyMax = 4
+        RetentionRecentMin = 1   # Always minimum 1
+        RetentionRecentMax = 6
+    }
+    
+    # Check if ring has policies stored
+    if ($Ring.Policies) {
+        # Merge with defaults (in case new policy fields added)
+        foreach ($key in $defaults.Keys) {
+            if ($null -eq $Ring.Policies.$key) {
+                $Ring.Policies | Add-Member -NotePropertyName $key -NotePropertyValue $defaults[$key] -Force
+            }
+        }
+        return $Ring.Policies
+    }
+    
+    return [PSCustomObject]$defaults
+}
+
+function Edit-RingPolicies {
+    <#
+    .SYNOPSIS
+        Edit retention limits for the active ring
+    #>
+    Clear-Host
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "     EDIT RETENTION LIMITS" -ForegroundColor Cyan
+    Write-Host "========================================`n" -ForegroundColor Cyan
+    
+    $policies = Get-RingPolicies -Ring $script:ActiveRing
+    
+    Write-Host "Enter new values (press Enter to keep current value)" -ForegroundColor Gray
+    Write-Host ""
+    
+    # Monthly
+    Write-Host "MONTHLY (end of month copies)" -ForegroundColor Yellow
+    $newMonthlyMin = Read-Host "  Min [$($policies.RetentionMonthlyMin)]"
+    $newMonthlyMax = Read-Host "  Max [$($policies.RetentionMonthlyMax)]"
+    
+    if ([string]::IsNullOrWhiteSpace($newMonthlyMin)) { $newMonthlyMin = $policies.RetentionMonthlyMin }
+    if ([string]::IsNullOrWhiteSpace($newMonthlyMax)) { $newMonthlyMax = $policies.RetentionMonthlyMax }
+    
+    # Weekly
+    Write-Host ""
+    Write-Host "WEEKLY (Saturday copies)" -ForegroundColor Yellow
+    $newWeeklyMin = Read-Host "  Min [$($policies.RetentionWeeklyMin)]"
+    $newWeeklyMax = Read-Host "  Max [$($policies.RetentionWeeklyMax)]"
+    
+    if ([string]::IsNullOrWhiteSpace($newWeeklyMin)) { $newWeeklyMin = $policies.RetentionWeeklyMin }
+    if ([string]::IsNullOrWhiteSpace($newWeeklyMax)) { $newWeeklyMax = $policies.RetentionWeeklyMax }
+    
+    # Recent
+    Write-Host ""
+    Write-Host "RECENT (rolling backups, min always 1)" -ForegroundColor Yellow
+    $newRecentMin = Read-Host "  Min (1 or higher) [$($policies.RetentionRecentMin)]"
+    $newRecentMax = Read-Host "  Max [$($policies.RetentionRecentMax)]"
+    
+    if ([string]::IsNullOrWhiteSpace($newRecentMin)) { $newRecentMin = $policies.RetentionRecentMin }
+    if ([string]::IsNullOrWhiteSpace($newRecentMax)) { $newRecentMax = $policies.RetentionRecentMax }
+    
+    # Validate
+    $valid = $true
+    
+    if ([int]$newRecentMin -lt 1) {
+        Write-Host "`nError: Recent Min must be at least 1!" -ForegroundColor Red
+        $valid = $false
+    }
+    
+    if ([int]$newMonthlyMin -gt [int]$newMonthlyMax) {
+        Write-Host "Error: Monthly Min cannot exceed Max!" -ForegroundColor Red
+        $valid = $false
+    }
+    if ([int]$newWeeklyMin -gt [int]$newWeeklyMax) {
+        Write-Host "Error: Weekly Min cannot exceed Max!" -ForegroundColor Red
+        $valid = $false
+    }
+    if ([int]$newRecentMin -gt [int]$newRecentMax) {
+        Write-Host "Error: Recent Min cannot exceed Max!" -ForegroundColor Red
+        $valid = $false
+    }
+    
+    if (-not $valid) {
+        Read-Host "`nPress Enter to try again"
+        return
+    }
+    
+    # Save policies
+    $newPolicies = @{
+        RetentionMonthlyMin = [int]$newMonthlyMin
+        RetentionMonthlyMax = [int]$newMonthlyMax
+        RetentionWeeklyMin = [int]$newWeeklyMin
+        RetentionWeeklyMax = [int]$newWeeklyMax
+        RetentionRecentMin = [int]$newRecentMin
+        RetentionRecentMax = [int]$newRecentMax
+    }
+    
+    # Update ring in saved rings
+    $rings = Get-SavedRings
+    for ($i = 0; $i -lt $rings.Count; $i++) {
+        if ($rings[$i].Tag -eq $script:ActiveRing.Tag) {
+            $rings[$i] | Add-Member -NotePropertyName 'Policies' -NotePropertyValue ([PSCustomObject]$newPolicies) -Force
+            $script:ActiveRing = $rings[$i]
+            break
+        }
+    }
+    Save-Rings -Rings $rings
+    
+    Write-Host ""
+    Write-Host "Policies saved!" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Note: Use 'Publish Policies to All Peers' to push these limits to clients." -ForegroundColor Cyan
+    
+    Read-Host "`nPress Enter to continue"
+}
+
+function Publish-RingPoliciesToPeers {
+    <#
+    .SYNOPSIS
+        Publishes ring policies to all peers' _nodeinfo folders
+    #>
+    Clear-Host
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "     PUBLISH RING POLICIES" -ForegroundColor Cyan
+    Write-Host "========================================`n" -ForegroundColor Cyan
+    
+    $policies = Get-RingPolicies -Ring $script:ActiveRing
+    
+    Write-Host "This will write ring-policies.json to all peers in the ring." -ForegroundColor Gray
+    Write-Host "Clients will auto-enforce these limits after their next successful backup." -ForegroundColor Gray
+    Write-Host ""
+    
+    $confirm = Read-Host "Continue? [Y/n]"
+    if ($confirm -match '^[Nn]') {
+        return
+    }
+    
+    Write-Host ""
+    Write-Host "Discovering peers..." -ForegroundColor Gray
+    
+    $peers = Get-TailscalePeersByTag -Tag $script:ActiveRing.Tag
+    $successCount = 0
+    $failCount = 0
+    
+    foreach ($peer in $peers) {
+        Write-Host "  $($peer.HostName)... " -NoNewline
+        
+        try {
+            # Connect to peer's share
+            $sharePath = "\\$($peer.TailscaleIP)\RR_Backups"
+            $password = Get-RRMServicePassword -CustomerCode $script:ActiveRing.CustomerCode
+            
+            # Build credential
+            $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+            $credential = New-Object System.Management.Automation.PSCredential("RR_Service", $securePassword)
+            
+            # Test/mount share
+            $testResult = Test-Path $sharePath -ErrorAction SilentlyContinue
+            if (-not $testResult) {
+                # Try mounting with credentials
+                $netUseResult = net use $sharePath /user:RR_Service $password 2>&1
+            }
+            
+            $nodeInfoPath = Join-Path $sharePath "_nodeinfo"
+            if (-not (Test-Path $nodeInfoPath)) {
+                New-Item -Path $nodeInfoPath -ItemType Directory -Force | Out-Null
+            }
+            
+            $policyFile = Join-Path $nodeInfoPath "ring-policies.json"
+            
+            $policyData = @{
+                RingName = $script:ActiveRing.Name
+                CustomerCode = $script:ActiveRing.CustomerCode
+                UpdatedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                Policies = $policies
+            }
+            
+            $policyData | ConvertTo-Json -Depth 10 | Set-Content $policyFile -Force
+            
+            Write-Host "OK" -ForegroundColor Green
+            $successCount++
+        }
+        catch {
+            Write-Host "FAILED" -ForegroundColor Red
+            $failCount++
+        }
+        finally {
+            # Disconnect share
+            net use $sharePath /delete 2>&1 | Out-Null
+        }
+    }
+    
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "Results: $successCount succeeded, $failCount failed" -ForegroundColor $(if($failCount -eq 0){"Green"}else{"Yellow"})
+    Write-Host "========================================" -ForegroundColor Cyan
+    
+    Write-Log "Published ring policies to $successCount/$($peers.Count) peers" -Level INFO
+    
+    Read-Host "`nPress Enter to continue"
+}
+
 #endregion
 
 #region Ring Selector
@@ -1283,6 +1552,7 @@ function Show-MainMenu {
     Write-Host "   4. Connect to New Ring" -ForegroundColor White
     Write-Host "   5. Show All Connected Rings" -ForegroundColor White
     Write-Host "   6. Rescan Ring" -ForegroundColor White
+    Write-Host "   7. Ring Policies" -ForegroundColor White
 
     Write-Host ""
     Write-Host " SYSTEM" -ForegroundColor Yellow
@@ -1304,6 +1574,7 @@ function Start-MainLoop {
             "4" { Connect-ToNewRing }
             "5" { Show-AllRings }
             "6" { Invoke-RingRescan }
+            "7" { Show-RingPolicies }
             "U" { Invoke-RRMUpdate }
             "0" {
                 Write-Host "`nExiting Ring Manager..." -ForegroundColor Cyan

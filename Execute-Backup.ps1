@@ -213,6 +213,117 @@ function Get-JobsWithStatus {
     return $jobs
 }
 
+function Get-RingPolicies {
+    <#
+    .SYNOPSIS
+        Reads ring policies from local _nodeinfo/ring-policies.json
+    #>
+    $defaults = @{
+        RetentionMonthlyMin = 0; RetentionMonthlyMax = 3
+        RetentionWeeklyMin = 0; RetentionWeeklyMax = 4
+        RetentionRecentMin = 1; RetentionRecentMax = 6
+    }
+    
+    try {
+        $config = Get-RingConfig
+        if (-not $config -or -not $config.StoragePath) {
+            return [PSCustomObject]$defaults
+        }
+        
+        $policyFile = Join-Path $config.StoragePath "_nodeinfo\ring-policies.json"
+        if (-not (Test-Path $policyFile)) {
+            return [PSCustomObject]$defaults
+        }
+        
+        $policyData = Get-Content $policyFile -Raw | ConvertFrom-Json
+        if ($policyData.Policies) {
+            $result = @{}
+            foreach ($key in $defaults.Keys) {
+                $result[$key] = if ($null -ne $policyData.Policies.$key) { $policyData.Policies.$key } else { $defaults[$key] }
+            }
+            return [PSCustomObject]$result
+        }
+    }
+    catch { }
+    
+    return [PSCustomObject]$defaults
+}
+
+function Invoke-RingPolicyEnforcement {
+    <#
+    .SYNOPSIS
+        Enforces ring policies on a job's retention settings after successful backup
+    .DESCRIPTION
+        If a job's retention values exceed ring policy limits, automatically adjusts
+        the master data to comply. This ensures ring-wide consistency.
+    #>
+    param([string]$JobName)
+    
+    try {
+        $policies = Get-RingPolicies
+        $jobs = Get-Jobs
+        $modified = $false
+        
+        for ($i = 0; $i -lt $jobs.Count; $i++) {
+            if ($jobs[$i].JobName -ne $JobName) { continue }
+            
+            $job = $jobs[$i]
+            
+            # Check and enforce Monthly limits
+            if ($null -ne $job.RetentionMonthly) {
+                if ($job.RetentionMonthly -lt $policies.RetentionMonthlyMin) {
+                    Write-Log "Policy enforcement: $JobName Monthly $($job.RetentionMonthly) -> $($policies.RetentionMonthlyMin) (below min)" -Level INFO
+                    $jobs[$i] | Add-Member -NotePropertyName 'RetentionMonthly' -NotePropertyValue $policies.RetentionMonthlyMin -Force
+                    $modified = $true
+                }
+                elseif ($job.RetentionMonthly -gt $policies.RetentionMonthlyMax) {
+                    Write-Log "Policy enforcement: $JobName Monthly $($job.RetentionMonthly) -> $($policies.RetentionMonthlyMax) (above max)" -Level INFO
+                    $jobs[$i] | Add-Member -NotePropertyName 'RetentionMonthly' -NotePropertyValue $policies.RetentionMonthlyMax -Force
+                    $modified = $true
+                }
+            }
+            
+            # Check and enforce Weekly limits
+            if ($null -ne $job.RetentionWeekly) {
+                if ($job.RetentionWeekly -lt $policies.RetentionWeeklyMin) {
+                    Write-Log "Policy enforcement: $JobName Weekly $($job.RetentionWeekly) -> $($policies.RetentionWeeklyMin) (below min)" -Level INFO
+                    $jobs[$i] | Add-Member -NotePropertyName 'RetentionWeekly' -NotePropertyValue $policies.RetentionWeeklyMin -Force
+                    $modified = $true
+                }
+                elseif ($job.RetentionWeekly -gt $policies.RetentionWeeklyMax) {
+                    Write-Log "Policy enforcement: $JobName Weekly $($job.RetentionWeekly) -> $($policies.RetentionWeeklyMax) (above max)" -Level INFO
+                    $jobs[$i] | Add-Member -NotePropertyName 'RetentionWeekly' -NotePropertyValue $policies.RetentionWeeklyMax -Force
+                    $modified = $true
+                }
+            }
+            
+            # Check and enforce Recent limits
+            if ($null -ne $job.RetentionRecent) {
+                if ($job.RetentionRecent -lt $policies.RetentionRecentMin) {
+                    Write-Log "Policy enforcement: $JobName Recent $($job.RetentionRecent) -> $($policies.RetentionRecentMin) (below min)" -Level INFO
+                    $jobs[$i] | Add-Member -NotePropertyName 'RetentionRecent' -NotePropertyValue $policies.RetentionRecentMin -Force
+                    $modified = $true
+                }
+                elseif ($job.RetentionRecent -gt $policies.RetentionRecentMax) {
+                    Write-Log "Policy enforcement: $JobName Recent $($job.RetentionRecent) -> $($policies.RetentionRecentMax) (above max)" -Level INFO
+                    $jobs[$i] | Add-Member -NotePropertyName 'RetentionRecent' -NotePropertyValue $policies.RetentionRecentMax -Force
+                    $modified = $true
+                }
+            }
+            
+            break
+        }
+        
+        if ($modified) {
+            Save-Jobs -Jobs $jobs
+            Write-Log "Ring policy enforcement: Updated job $JobName to comply with ring limits" -Level INFO
+        }
+    }
+    catch {
+        Write-Log "Policy enforcement error: $_" -Level WARNING
+    }
+}
+
 # Note: Publish-NodeStatus is defined in PeerManagement.ps1 (loaded above)
 
 #endregion
@@ -770,6 +881,11 @@ function Invoke-BackupJob {
     
     $finalStatus = if ($success) { "Success" } else { "Failed" }
     Update-JobStatus -JobName $JobName -Status $finalStatus -DurationSeconds $durationSeconds -SizeBytes $sizeBytes
+    
+    # After successful backup, enforce ring policies on job master data
+    if ($success) {
+        Invoke-RingPolicyEnforcement -JobName $JobName
+    }
     
     # Publish status to share for RRM
     Publish-NodeStatus

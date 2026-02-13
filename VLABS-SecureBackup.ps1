@@ -421,6 +421,44 @@ function Get-JobsWithStatus {
     return $jobs
 }
 
+function Get-RingPolicies {
+    <#
+    .SYNOPSIS
+        Reads ring policies from local _nodeinfo/ring-policies.json
+    .DESCRIPTION
+        Returns policies set by RRM, or defaults if not available.
+    #>
+    $defaults = @{
+        RetentionMonthlyMin = 0; RetentionMonthlyMax = 3
+        RetentionWeeklyMin = 0; RetentionWeeklyMax = 4
+        RetentionRecentMin = 1; RetentionRecentMax = 6
+    }
+    
+    try {
+        $config = Get-RingConfig
+        if (-not $config -or -not $config.StoragePath) {
+            return [PSCustomObject]$defaults
+        }
+        
+        $policyFile = Join-Path $config.StoragePath "_nodeinfo\ring-policies.json"
+        if (-not (Test-Path $policyFile)) {
+            return [PSCustomObject]$defaults
+        }
+        
+        $policyData = Get-Content $policyFile -Raw | ConvertFrom-Json
+        if ($policyData.Policies) {
+            $result = @{}
+            foreach ($key in $defaults.Keys) {
+                $result[$key] = if ($null -ne $policyData.Policies.$key) { $policyData.Policies.$key } else { $defaults[$key] }
+            }
+            return [PSCustomObject]$result
+        }
+    }
+    catch { }
+    
+    return [PSCustomObject]$defaults
+}
+
 #endregion Master/Transaction Data Separation
 
 #endregion
@@ -1539,10 +1577,11 @@ function Edit-BackupJob {
         "1" {
             Write-Host ""
             if ($isNewFormat) {
-                # Retention limits
-                $monthlyMin = 0; $monthlyMax = 3
-                $weeklyMin = 0; $weeklyMax = 4
-                $recentMin = 1; $recentMax = 6
+                # Get retention limits from ring policies (set by RRM)
+                $policies = Get-RingPolicies
+                $monthlyMin = $policies.RetentionMonthlyMin; $monthlyMax = $policies.RetentionMonthlyMax
+                $weeklyMin = $policies.RetentionWeeklyMin; $weeklyMax = $policies.RetentionWeeklyMax
+                $recentMin = $policies.RetentionRecentMin; $recentMax = $policies.RetentionRecentMax
                 
                 Write-Host "Current: $($job.RetentionMonthly) monthly, $($job.RetentionWeekly) weekly, $($job.RetentionRecent) recent" -ForegroundColor Gray
                 Write-Host "Limits: Monthly 0-$monthlyMax, Weekly 0-$weeklyMax, Recent $recentMin-$recentMax" -ForegroundColor Gray
