@@ -87,10 +87,12 @@ function Update-JobStatus {
     
     for ($i = 0; $i -lt $jobs.Count; $i++) {
         if ($jobs[$i].JobName -eq $JobName) {
-            $jobs[$i].LastRun = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-            $jobs[$i].LastStatus = $Status
-            $jobs[$i].LastDurationSeconds = $DurationSeconds
-            $jobs[$i].LastSizeBytes = $SizeBytes
+            # Use Add-Member with -Force to handle both new and existing properties
+            # This works for PSCustomObjects loaded from JSON
+            $jobs[$i] | Add-Member -NotePropertyName 'LastRun' -NotePropertyValue (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") -Force
+            $jobs[$i] | Add-Member -NotePropertyName 'LastStatus' -NotePropertyValue $Status -Force
+            $jobs[$i] | Add-Member -NotePropertyName 'LastDurationSeconds' -NotePropertyValue $DurationSeconds -Force
+            $jobs[$i] | Add-Member -NotePropertyName 'LastSizeBytes' -NotePropertyValue $SizeBytes -Force
             Save-Jobs -Jobs $jobs
             return
         }
