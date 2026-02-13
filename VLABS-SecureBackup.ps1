@@ -231,9 +231,16 @@ function Save-Destinations {
 
 function Get-Jobs {
     try {
-        if (-not (Test-Path $JobsFile)) { return @() }
+        Write-Host "DEBUG Get-Jobs: JobsFile = $JobsFile" -ForegroundColor Magenta
+        if (-not (Test-Path $JobsFile)) { 
+            Write-Host "DEBUG Get-Jobs: File not found!" -ForegroundColor Red
+            return @() 
+        }
+        Write-Host "DEBUG Get-Jobs: File exists, reading..." -ForegroundColor Magenta
         $content = Get-Content $JobsFile -Raw -ErrorAction Stop
+        Write-Host "DEBUG Get-Jobs: Content length = $($content.Length) chars" -ForegroundColor Magenta
         $result = $content | ConvertFrom-Json
+        Write-Host "DEBUG Get-Jobs: Parsed, result type = $($result.GetType().Name), count = $(@($result).Count)" -ForegroundColor Magenta
 
         # Handle corrupted format where jobs are wrapped in {"value": [...]}
         if ($result.value -and $result.value -is [Array]) {
@@ -243,13 +250,16 @@ function Get-Jobs {
 
         # Force result to be an array (PowerShell returns single objects as non-arrays)
         if ($null -eq $result) {
+            Write-Host "DEBUG Get-Jobs: Result is null!" -ForegroundColor Red
             return @()
         }
 
         # Use @() to ensure we always have an array, even with one item
+        Write-Host "DEBUG Get-Jobs: Returning $(@($result).Count) jobs" -ForegroundColor Magenta
         return @($result)
     }
     catch {
+        Write-Host "DEBUG Get-Jobs: EXCEPTION: $_" -ForegroundColor Red
         Write-Log "Error reading jobs: $_" -Level ERROR
         return @()
     }
