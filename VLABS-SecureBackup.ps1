@@ -1539,30 +1539,42 @@ function Edit-BackupJob {
         "1" {
             Write-Host ""
             if ($isNewFormat) {
+                # Retention limits
+                $monthlyMin = 0; $monthlyMax = 3
+                $weeklyMin = 0; $weeklyMax = 4
+                $recentMin = 1; $recentMax = 6
+                
                 Write-Host "Current: $($job.RetentionMonthly) monthly, $($job.RetentionWeekly) weekly, $($job.RetentionRecent) recent" -ForegroundColor Gray
-                Write-Host "Note: 0 = none of that type. 0,0,0 = keep only latest copy." -ForegroundColor Gray
+                Write-Host "Limits: Monthly 0-$monthlyMax, Weekly 0-$weeklyMax, Recent $recentMin-$recentMax" -ForegroundColor Gray
                 Write-Host ""
-                $newMonthly = Read-Host "Monthly copies [0 = none] [$($job.RetentionMonthly)]"
-                $newWeekly = Read-Host "Weekly copies [0 = none] [$($job.RetentionWeekly)]"
-                $newRecent = Read-Host "Recent copies [0 = latest only] [$($job.RetentionRecent)]"
+                $newMonthly = Read-Host "Monthly copies (0-$monthlyMax) [$($job.RetentionMonthly)]"
+                $newWeekly = Read-Host "Weekly copies (0-$weeklyMax) [$($job.RetentionWeekly)]"
+                $newRecent = Read-Host "Recent copies ($recentMin-$recentMax) [$($job.RetentionRecent)]"
                 
                 if ([string]::IsNullOrWhiteSpace($newMonthly)) { $newMonthly = $job.RetentionMonthly }
                 if ([string]::IsNullOrWhiteSpace($newWeekly)) { $newWeekly = $job.RetentionWeekly }
                 if ([string]::IsNullOrWhiteSpace($newRecent)) { $newRecent = $job.RetentionRecent }
                 
-                # All values >= 0 are valid (0,0,0 = keep only latest)
-                if (($newMonthly -as [int]) -ge 0 -and ($newWeekly -as [int]) -ge 0 -and ($newRecent -as [int]) -ge 0) {
+                # Validate within limits
+                $valid = $true
+                if (($newMonthly -as [int]) -lt $monthlyMin -or ($newMonthly -as [int]) -gt $monthlyMax) {
+                    Write-Host "Monthly must be between $monthlyMin and $monthlyMax" -ForegroundColor Red
+                    $valid = $false
+                }
+                if (($newWeekly -as [int]) -lt $weeklyMin -or ($newWeekly -as [int]) -gt $weeklyMax) {
+                    Write-Host "Weekly must be between $weeklyMin and $weeklyMax" -ForegroundColor Red
+                    $valid = $false
+                }
+                if (($newRecent -as [int]) -lt $recentMin -or ($newRecent -as [int]) -gt $recentMax) {
+                    Write-Host "Recent must be between $recentMin and $recentMax" -ForegroundColor Red
+                    $valid = $false
+                }
+                
+                if ($valid) {
                     $jobs[$index].RetentionMonthly = [int]$newMonthly
                     $jobs[$index].RetentionWeekly = [int]$newWeekly
                     $jobs[$index].RetentionRecent = [int]$newRecent
-                    
-                    if ([int]$newMonthly -eq 0 -and [int]$newWeekly -eq 0 -and [int]$newRecent -eq 0) {
-                        Write-Host "`nRetention set to 0,0,0: Keep only the latest copy (no history)" -ForegroundColor Cyan
-                    }
-                    Write-Host "Retention updated!" -ForegroundColor Green
-                }
-                else {
-                    Write-Host "`nInvalid values! All must be non-negative numbers." -ForegroundColor Red
+                    Write-Host "`nRetention updated!" -ForegroundColor Green
                 }
             }
             else {

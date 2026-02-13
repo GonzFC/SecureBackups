@@ -338,41 +338,39 @@ function New-UnifiedBackupJob {
     Write-Host "Recent copies are the most recent backups (always created)."
     Write-Host ""
     
-    $monthlyRetention = Read-Host "Monthly copies to keep [0 = none]"
-    if (-not ($monthlyRetention -as [int]) -or [int]$monthlyRetention -lt 0) {
-        Write-Host "`nError: Must be a non-negative number!" -ForegroundColor Red
+    # Retention limits (can be overridden by Ring Policies in future)
+    $monthlyMin = 0; $monthlyMax = 3
+    $weeklyMin = 0; $weeklyMax = 4
+    $recentMin = 1; $recentMax = 6
+    
+    $monthlyRetention = Read-Host "Monthly copies to keep (0-$monthlyMax)"
+    if (-not ($monthlyRetention -as [int]) -or [int]$monthlyRetention -lt $monthlyMin -or [int]$monthlyRetention -gt $monthlyMax) {
+        Write-Host "`nError: Must be between $monthlyMin and $monthlyMax!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
     
-    $weeklyRetention = Read-Host "Weekly copies to keep [0 = none]"
-    if (-not ($weeklyRetention -as [int]) -or [int]$weeklyRetention -lt 0) {
-        Write-Host "`nError: Must be a non-negative number!" -ForegroundColor Red
+    $weeklyRetention = Read-Host "Weekly copies to keep (0-$weeklyMax)"
+    if (-not ($weeklyRetention -as [int]) -or [int]$weeklyRetention -lt $weeklyMin -or [int]$weeklyRetention -gt $weeklyMax) {
+        Write-Host "`nError: Must be between $weeklyMin and $weeklyMax!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
     
-    $recentRetention = Read-Host "Recent copies to keep [0 = latest only]"
-    if (-not ($recentRetention -as [int]) -or [int]$recentRetention -lt 0) {
-        Write-Host "`nError: Must be a non-negative number!" -ForegroundColor Red
+    $recentRetention = Read-Host "Recent copies to keep ($recentMin-$recentMax)"
+    if (-not ($recentRetention -as [int]) -or [int]$recentRetention -lt $recentMin -or [int]$recentRetention -gt $recentMax) {
+        Write-Host "`nError: Must be between $recentMin and $recentMax!" -ForegroundColor Red
         Read-Host "`nPress Enter to continue"
         return
     }
     
     $totalMaxCopies = [int]$monthlyRetention + [int]$weeklyRetention + [int]$recentRetention
     
-    # Special case: 0,0,0 means "keep only the latest copy"
-    if ($totalMaxCopies -eq 0) {
-        Write-Host ""
-        Write-Host "Note: 0,0,0 = Keep only the latest copy (no history)" -ForegroundColor Cyan
-        $effectiveRecent = 1  # Internally ensure at least 1 survives
-    }
-    
     Write-Host ""
-    Write-Host "Maximum copies: $(if($totalMaxCopies -eq 0){1}else{$totalMaxCopies})" -ForegroundColor Cyan
+    Write-Host "Maximum copies: $totalMaxCopies" -ForegroundColor Cyan
     Write-Host "  - Up to $monthlyRetention monthly (end of month)" -ForegroundColor Gray
     Write-Host "  - Up to $weeklyRetention weekly (Saturdays)" -ForegroundColor Gray
-    Write-Host "  - Up to $recentRetention recent$(if($totalMaxCopies -eq 0){' (effective: 1)'}else{''})" -ForegroundColor Gray
+    Write-Host "  - Up to $recentRetention recent" -ForegroundColor Gray
 
     # Step 5: Frequency
     Write-Host "`n--- Step 5: Set Frequency ---" -ForegroundColor Yellow

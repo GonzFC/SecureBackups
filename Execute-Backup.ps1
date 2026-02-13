@@ -264,9 +264,9 @@ function Invoke-RetentionCleanup {
     .SYNOPSIS
         Cleans up old backups based on retention policy
     .DESCRIPTION
-        Retention values of 0 mean "don't keep any of this type".
-        Special case: If all three are 0, we keep exactly 1 recent copy (the latest).
-        This ensures we never delete ALL backups.
+        Called ONLY after successful and integrity-verified backup.
+        Retention values: Monthly 0-3, Weekly 0-4, Recent 1-6.
+        Recent is always >= 1, so at least one copy always survives.
     #>
     param(
         [string]$BasePath,
@@ -276,14 +276,10 @@ function Invoke-RetentionCleanup {
         [int]$RecentRetention
     )
     
-    # Safety: If all retentions are 0, keep at least 1 recent copy
-    $effectiveRecentRetention = $RecentRetention
-    if ($MonthlyRetention -eq 0 -and $WeeklyRetention -eq 0 -and $RecentRetention -eq 0) {
-        $effectiveRecentRetention = 1
-        Write-Log "Retention 0,0,0 = keeping only latest copy" -Level INFO
-    }
+    # Safety: Recent must be at least 1 (enforced at input, but double-check)
+    if ($RecentRetention -lt 1) { $RecentRetention = 1 }
     
-    Write-Log "Applying retention policy: $MonthlyRetention monthly, $WeeklyRetention weekly, $effectiveRecentRetention recent" -Level INFO
+    Write-Log "Applying retention policy: $MonthlyRetention monthly, $WeeklyRetention weekly, $RecentRetention recent" -Level INFO
     
     if (-not (Test-Path $BasePath)) { return }
     
@@ -314,9 +310,9 @@ function Invoke-RetentionCleanup {
         }
     }
     
-    # Delete excess recent (uses effective retention, minimum 1 if all are 0)
-    if ($recentFolders.Count -gt $effectiveRecentRetention) {
-        $toDelete = $recentFolders | Select-Object -Skip $effectiveRecentRetention
+    # Delete excess recent (always >= 1)
+    if ($recentFolders.Count -gt $RecentRetention) {
+        $toDelete = $recentFolders | Select-Object -Skip $RecentRetention
         foreach ($folder in $toDelete) {
             Write-Log "Deleting old recent backup: $($folder.Name)" -Level INFO
             Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
@@ -531,17 +527,18 @@ function Invoke-BackupToPeer {
         }
         
         if (-not $verified) {
-            Write-Log "Backup to $($Peer.Hostname) completed but verification failed!" -Level WARNING
+            Write-Log "Backup to $($Peer.Hostname) completed but verification failed! Skipping retention cleanup." -Level WARNING
+            $success = $false  # Mark as failed if verification fails
         }
         else {
             Write-Log "Backup to $($Peer.Hostname) completed and verified" -Level SUCCESS
+            
+            # Apply retention cleanup ONLY after successful AND verified backup
+            Invoke-RetentionCleanup -BasePath $basePath -AppName $appName `
+                -MonthlyRetention $Job.RetentionMonthly `
+                -WeeklyRetention $Job.RetentionWeekly `
+                -RecentRetention $Job.RetentionRecent
         }
-        
-        # Apply retention cleanup
-        Invoke-RetentionCleanup -BasePath $basePath -AppName $appName `
-            -MonthlyRetention $Job.RetentionMonthly `
-            -WeeklyRetention $Job.RetentionWeekly `
-            -RecentRetention $Job.RetentionRecent
     }
     else {
         Write-Log "Robocopy failed with exit code: $LASTEXITCODE" -Level ERROR
