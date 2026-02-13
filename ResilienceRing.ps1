@@ -600,12 +600,15 @@ if (Get-Command 'Invoke-JobsValidation' -ErrorAction SilentlyContinue) {
     Write-Host "Validating jobs and tasks..." -ForegroundColor Gray -NoNewline
     $validation = Invoke-JobsValidation
     
+    # Build summary of silent repairs (not shown as issues)
+    $summary = @()
+    if ($validation.JobsMigrated -gt 0) { $summary += "$($validation.JobsMigrated) migrated" }
+    if ($validation.JobsRepaired -gt 0) { $summary += "$($validation.JobsRepaired) auto-fixed" }
+    if ($validation.TasksCreated -gt 0) { $summary += "$($validation.TasksCreated) tasks created" }
+    if ($validation.TasksFixed -gt 0) { $summary += "$($validation.TasksFixed) tasks synced" }
+    
     if ($validation.Issues.Count -eq 0) {
-        $summary = @()
-        if ($validation.JobsMigrated -gt 0) { $summary += "$($validation.JobsMigrated) migrated" }
-        if ($validation.TasksCreated -gt 0) { $summary += "$($validation.TasksCreated) tasks created" }
-        if ($validation.TasksFixed -gt 0) { $summary += "$($validation.TasksFixed) tasks fixed" }
-        
+        # All good - show OK with summary
         if ($summary.Count -gt 0) {
             Write-Host " [OK: $($summary -join ', ')]" -ForegroundColor Green
         }
@@ -614,7 +617,11 @@ if (Get-Command 'Invoke-JobsValidation' -ErrorAction SilentlyContinue) {
         }
     }
     else {
-        Write-Host " [ISSUES]" -ForegroundColor Yellow
+        # Has issues that need attention, but still show what was auto-fixed
+        if ($summary.Count -gt 0) {
+            Write-Host " [$($summary -join ', ')]" -ForegroundColor Green
+        }
+        Write-Host "" # New line before issues
         foreach ($issue in $validation.Issues) {
             Write-Host "  ! $issue" -ForegroundColor Yellow
         }

@@ -1678,9 +1678,10 @@ function Invoke-JobsValidation {
     $result = @{
         JobsChecked = 0
         JobsMigrated = 0
+        JobsRepaired = 0      # Auto-fixed issues (silent success)
         TasksCreated = 0
         TasksFixed = 0
-        Issues = @()
+        Issues = @()          # Only actual problems that need user attention
     }
     
     $jobsFile = Join-Path (Get-RRDataPath) "jobs.json"
@@ -1691,7 +1692,8 @@ function Invoke-JobsValidation {
     # Migrate transaction data to separate file (one-time migration)
     $migratedCount = Invoke-TransactionDataMigration
     if ($migratedCount -gt 0) {
-        $result.Issues += "Migrated transaction data for $migratedCount job(s) to jobs-status.json"
+        $result.JobsMigrated += $migratedCount
+        # Not an issue - just a migration that happened silently
     }
     
     try {
@@ -1701,9 +1703,10 @@ function Invoke-JobsValidation {
         # This happens when PowerShell's ConvertTo-Json pipes an array
         if ($rawContent -is [PSCustomObject] -and $rawContent.PSObject.Properties.Name -contains 'value') {
             $jobs = @($rawContent.value)
-            $result.Issues += "Detected corrupted jobs.json format (was wrapped in object) - will repair"
+            # Silent repair - not shown to user
+            $result.JobsRepaired++
             $modified = $true
-            Write-RRDebug "Invoke-JobsValidation: Extracted $($jobs.Count) jobs from 'value' property"
+            Write-RRDebug "Invoke-JobsValidation: Extracted $($jobs.Count) jobs from 'value' property (auto-repaired)"
         }
         else {
             $jobs = @($rawContent)
@@ -1811,6 +1814,65 @@ function Invoke-JobsValidation {
             $result.JobsMigrated++
         }
         
+        # AUTO-FIX: Jobs without valid destination configuration
+        # This is NOT a user responsibility - app must fix silently
+        $hasValidDestination = ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) -or 
+                               ($job.DestinationPath -and $job.DestinationPath -ne '')
+        
+        if (-not $hasValidDestination) {
+            Write-RRDebug "Job '$($job.JobName)' has no valid destination - attempting auto-fix"
+            
+            $autoFixSuccess = $false
+            
+            # Try to auto-assign peer destinations
+            try {
+                $config = Get-RingConfig
+                if ($config -and $config.CustomerCode) {
+                    # Get available storage peers
+                    $storagePeers = Get-StoragePeers
+                    if ($storagePeers -and $storagePeers.Count -gt 0) {
+                        # Select minimum 2 peers (or all if fewer available)
+                        $peersToUse = $storagePeers | Select-Object -First ([Math]::Min(2, $storagePeers.Count))
+                        
+                        $peerDestinations = @()
+                        foreach ($peer in $peersToUse) {
+                            $peerDestinations += @{
+                                Hostname = $peer.Hostname
+                                TailscaleIP = $peer.TailscaleIP
+                                SharePath = "\\$($peer.TailscaleIP)\RR_Backups"
+                            }
+                        }
+                        
+                        $jobs[$i] | Add-Member -NotePropertyName 'PeerDestinations' -NotePropertyValue $peerDestinations -Force
+                        
+                        # Ensure retention values exist
+                        if ($null -eq $job.RetentionMonthly) {
+                            $jobs[$i] | Add-Member -NotePropertyName 'RetentionMonthly' -NotePropertyValue 1 -Force
+                        }
+                        if ($null -eq $job.RetentionWeekly) {
+                            $jobs[$i] | Add-Member -NotePropertyName 'RetentionWeekly' -NotePropertyValue 2 -Force
+                        }
+                        if ($null -eq $job.RetentionRecent) {
+                            $jobs[$i] | Add-Member -NotePropertyName 'RetentionRecent' -NotePropertyValue 3 -Force
+                        }
+                        
+                        $modified = $true
+                        $result.JobsRepaired++  # Silent repair, not shown to user
+                        $autoFixSuccess = $true
+                        Write-RRDebug "Auto-fixed job '$($job.JobName)' with $($peerDestinations.Count) peer(s)"
+                    }
+                }
+            }
+            catch {
+                Write-RRDebug "Could not auto-fix job '$($job.JobName)': $_"
+            }
+            
+            # Only report as issue if auto-fix failed and no storage peers available
+            if (-not $autoFixSuccess) {
+                $result.Issues += "Job '$($job.JobName)' has no destinations (run 'D' to discover peers first)"
+            }
+        }
+        
         # Note: LastRun, LastStatus, LastDurationSeconds, LastSizeBytes are now stored
         # in jobs-status.json (transaction data), not in jobs.json (master data)
         
@@ -1907,7 +1969,8 @@ function Invoke-JobsValidation {
             
             $json = ConvertTo-Json -InputObject $cleanJobs -Depth 10
             Set-Content -Path $jobsFile -Value $json -Force
-            $result.Issues += "Saved repaired jobs.json (master data only)"
+            # Not an issue - just informational
+            Write-RRDebug "Saved repaired jobs.json (master data only)"
         }
         catch {
             $result.Issues += "Could not save migrated jobs: $_"
