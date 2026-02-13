@@ -25,7 +25,7 @@ param(
 )
 
 # Version and repository information
-$script:AppVersion = '1.0.9'
+$script:AppVersion = '1.1.0'
 $script:AppName = 'VLABS Resilience Ring Manager'
 $script:RepoOwner = 'GonzFC'
 $script:RepoName = 'SecureBackups'
@@ -353,14 +353,32 @@ function Get-PeerData {
         }
 
         if ($customerPath -and (Test-Path $customerPath)) {
-            # Calculate storage used
+            # Calculate REPOSITORY storage (data stored ON this peer for the ring)
             $size = (Get-ChildItem $customerPath -Recurse -File -ErrorAction SilentlyContinue |
                      Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
             $result.StorageUsedGB = [math]::Round(($size / 1GB), 2)
+            
+            # Count locations (subdirectories under customer code = locations)
+            $locationFolders = Get-ChildItem $customerPath -Directory -ErrorAction SilentlyContinue
+            $result.LocationCount = $locationFolders.Count
+            $result.Locations = @($locationFolders | ForEach-Object { $_.Name })
         }
 
-        # Try to read peer's config from ProgramData share (if accessible)
-        # For now, we just calculate storage
+        # Read jobs-status.json from _nodeinfo
+        $statusFile = Join-Path $sharePath "_nodeinfo\jobs-status.json"
+        if (Test-Path $statusFile) {
+            try {
+                $jobsStatus = Get-Content $statusFile -Raw | ConvertFrom-Json
+                $result.JobsStatus = $jobsStatus
+                $result.Jobs = @($jobsStatus.Jobs)
+                
+                # Count successful jobs
+                $result.SuccessfulJobs = @($jobsStatus.Jobs | Where-Object { $_.LastStatus -eq 'Success' }).Count
+                $result.TotalJobs = $jobsStatus.Jobs.Count
+                $result.NodeLocation = $jobsStatus.Location
+            }
+            catch { }
+        }
 
     }
     catch {
@@ -447,26 +465,85 @@ function Get-RingStatistics {
             LastSeen = $peer.LastSeen
             StorageUsedGB = 0
             Jobs = @()
+            SuccessfulJobs = 0
+            TotalJobs = 0
+            LocationCount = 0
+            Locations = @()
+            NodeLocation = ""
             Status = "Unknown"
+            IsSelf = $peer.IsSelf
         }
 
-        if ($peer.Online) {
+        if ($peer.Online -or $peer.IsSelf) {
             $stats.OnlinePeers++
 
-            # Get peer data
-            $peerData = Get-PeerData -TailscaleIP $peer.TailscaleIP -CustomerCode $CustomerCode
-
-            if ($peerData.Connected) {
-                $peerStats.StorageUsedGB = $peerData.StorageUsedGB
-                $peerStats.Status = "OK"
-                $stats.TotalUsedGB += $peerData.StorageUsedGB
-                Write-Host " OK ($($peerData.StorageUsedGB) GB)" -ForegroundColor Green
+            # Handle self differently - read local data
+            if ($peer.IsSelf) {
+                Write-Host " (self)" -ForegroundColor Gray -NoNewline
+                
+                # Read local jobs directly
+                try {
+                    $localJobsFile = "C:\ProgramData\VLABS_ResilienceRing\jobs.json"
+                    $localConfigFile = "C:\ProgramData\VLABS_ResilienceRing\ring-config.json"
+                    
+                    if (Test-Path $localJobsFile) {
+                        $localJobs = @(Get-Content $localJobsFile -Raw | ConvertFrom-Json)
+                        $peerStats.Jobs = $localJobs
+                        $peerStats.TotalJobs = $localJobs.Count
+                        $peerStats.SuccessfulJobs = @($localJobs | Where-Object { $_.LastStatus -eq 'Success' }).Count
+                    }
+                    
+                    if (Test-Path $localConfigFile) {
+                        $localConfig = Get-Content $localConfigFile -Raw | ConvertFrom-Json
+                        $peerStats.NodeLocation = $localConfig.Location
+                        
+                        # Calculate repository storage (what's stored locally)
+                        if ($localConfig.StoragePath -and (Test-Path $localConfig.StoragePath)) {
+                            $repoSize = (Get-ChildItem $localConfig.StoragePath -Recurse -File -ErrorAction SilentlyContinue |
+                                        Measure-Object -Property Length -Sum).Sum
+                            $peerStats.StorageUsedGB = [math]::Round(($repoSize / 1GB), 2)
+                            
+                            # Count locations
+                            $custPath = Join-Path $localConfig.StoragePath $CustomerCode.ToUpper()
+                            if (Test-Path $custPath) {
+                                $locFolders = Get-ChildItem $custPath -Directory -ErrorAction SilentlyContinue
+                                $peerStats.LocationCount = $locFolders.Count
+                                $peerStats.Locations = @($locFolders | ForEach-Object { $_.Name })
+                            }
+                        }
+                    }
+                    
+                    $peerStats.Status = "OK"
+                    $stats.TotalUsedGB += $peerStats.StorageUsedGB
+                    Write-Host " OK ($($peerStats.SuccessfulJobs)/$($peerStats.TotalJobs) jobs, $($peerStats.StorageUsedGB) GB)" -ForegroundColor Green
+                }
+                catch {
+                    $peerStats.Status = "Error"
+                    Write-Host " ERROR: $_" -ForegroundColor Red
+                }
             }
             else {
-                $peerStats.Status = "Connection Failed"
-                $errorDetail = if ($peerData.Error) { $peerData.Error } else { "Unknown error" }
-                $stats.Problems += "Cannot connect to $($peer.HostName): $errorDetail"
-                Write-Host " CONN FAILED" -ForegroundColor Red
+                # Get peer data via network
+                $peerData = Get-PeerData -TailscaleIP $peer.TailscaleIP -CustomerCode $CustomerCode
+
+                if ($peerData.Connected) {
+                    $peerStats.StorageUsedGB = $peerData.StorageUsedGB
+                    $peerStats.Jobs = $peerData.Jobs
+                    $peerStats.SuccessfulJobs = if ($peerData.SuccessfulJobs) { $peerData.SuccessfulJobs } else { 0 }
+                    $peerStats.TotalJobs = if ($peerData.TotalJobs) { $peerData.TotalJobs } else { 0 }
+                    $peerStats.LocationCount = if ($peerData.LocationCount) { $peerData.LocationCount } else { 0 }
+                    $peerStats.Locations = if ($peerData.Locations) { $peerData.Locations } else { @() }
+                    $peerStats.NodeLocation = if ($peerData.NodeLocation) { $peerData.NodeLocation } else { "" }
+                    $peerStats.Status = "OK"
+                    $stats.TotalUsedGB += $peerData.StorageUsedGB
+                    Write-Host " OK ($($peerStats.SuccessfulJobs)/$($peerStats.TotalJobs) jobs, $($peerData.StorageUsedGB) GB)" -ForegroundColor Green
+                }
+                else {
+                    $peerStats.Status = "Connection Failed"
+                    $errorDetail = if ($peerData.Error) { $peerData.Error } else { "Unknown error" }
+                    $stats.Problems += "Cannot connect to $($peer.HostName): $errorDetail"
+                    Write-Host " CONN FAILED" -ForegroundColor Red
+                }
             }
         }
         else {
@@ -703,8 +780,8 @@ function Show-RingStatistics {
     Write-Host "  PEER DETAILS" -ForegroundColor Yellow
     Write-Host "========================================" -ForegroundColor White
     Write-Host ""
-    Write-Host "  Hostname              | IP               | Status    | Storage" -ForegroundColor Gray
-    Write-Host "  ----------------------|------------------|-----------|--------" -ForegroundColor Gray
+    Write-Host "  Hostname              | IP               | Good Backups | Locations | Status    | Repository" -ForegroundColor Gray
+    Write-Host "  ----------------------|------------------|--------------|-----------|-----------|----------" -ForegroundColor Gray
 
     foreach ($peer in $stats.Peers) {
         $statusColor = switch ($peer.Status) {
@@ -712,10 +789,24 @@ function Show-RingStatistics {
             "Offline" { "Red" }
             default { "Yellow" }
         }
+        
+        # Good Backups: successful/total jobs
+        $goodBackups = "$($peer.SuccessfulJobs)/$($peer.TotalJobs)"
+        $goodBackupsColor = if ($peer.TotalJobs -eq 0) { "Gray" } 
+                           elseif ($peer.SuccessfulJobs -eq $peer.TotalJobs) { "Green" } 
+                           else { "Yellow" }
+        
+        # Locations: count of locations with backups stored on this peer (as repository)
+        $locationsDisplay = "$($peer.LocationCount)"
+        $locationsColor = if ($peer.LocationCount -gt 0) { "Cyan" } else { "Gray" }
 
         Write-Host ("  {0,-21} | {1,-16} | " -f
             $peer.Hostname.Substring(0, [Math]::Min(21, $peer.Hostname.Length)),
             $peer.TailscaleIP) -NoNewline
+        Write-Host ("{0,-12}" -f $goodBackups) -ForegroundColor $goodBackupsColor -NoNewline
+        Write-Host " | " -NoNewline
+        Write-Host ("{0,-9}" -f $locationsDisplay) -ForegroundColor $locationsColor -NoNewline
+        Write-Host " | " -NoNewline
         Write-Host ("{0,-9}" -f $peer.Status) -ForegroundColor $statusColor -NoNewline
         Write-Host " | $($peer.StorageUsedGB) GB"
     }
