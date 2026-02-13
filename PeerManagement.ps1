@@ -1672,7 +1672,24 @@ function Invoke-JobsValidation {
         }
         
         # Check scheduled task exists
-        $taskName = $jobs[$i].TaskName
+        # Ensure TaskName is a proper string (could be array if corrupted)
+        $rawTaskName = $jobs[$i].TaskName
+        if ($rawTaskName -is [Array]) {
+            # Corrupted: take first element
+            $taskName = [string]$rawTaskName[0]
+            $jobs[$i] | Add-Member -NotePropertyName 'TaskName' -NotePropertyValue $taskName -Force
+            $modified = $true
+            $result.JobsMigrated++
+        }
+        else {
+            $taskName = [string]$rawTaskName
+        }
+        
+        if ([string]::IsNullOrWhiteSpace($taskName) -or $taskName -eq "VLABS_Backup_") {
+            $taskName = "VLABS_Backup_$([string]$job.JobName)"
+            $jobs[$i] | Add-Member -NotePropertyName 'TaskName' -NotePropertyValue $taskName -Force
+            $modified = $true
+        }
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         
         if (-not $task) {
@@ -1704,16 +1721,19 @@ function Invoke-JobsValidation {
             
             if ($taskEnabled -ne $jobEnabled) {
                 try {
+                    # Ensure taskName is a clean string for the cmdlet
+                    $cleanTaskName = $taskName.Trim()
                     if ($jobEnabled) {
-                        Enable-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
+                        Enable-ScheduledTask -TaskName $cleanTaskName -ErrorAction Stop | Out-Null
                     }
                     else {
-                        Disable-ScheduledTask -TaskName $taskName -ErrorAction Stop | Out-Null
+                        Disable-ScheduledTask -TaskName $cleanTaskName -ErrorAction Stop | Out-Null
                     }
                     $result.TasksFixed++
                 }
                 catch {
-                    $result.Issues += "Could not sync task state for $($job.JobName): $_"
+                    $jobNameStr = if ($job.JobName -is [Array]) { $job.JobName[0] } else { $job.JobName }
+                    $result.Issues += "Could not sync task state for $jobNameStr : $_"
                 }
             }
         }

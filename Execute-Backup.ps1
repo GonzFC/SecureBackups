@@ -382,9 +382,17 @@ function Invoke-BackupToPeer {
     Write-Log "Running robocopy: $($Job.BackupObject) -> $destPath" -Level INFO
     
     $robocopyCmd = "robocopy $($robocopyArgs -join ' ')"
-    Invoke-Expression $robocopyCmd | Out-Null
+    try {
+        Invoke-Expression $robocopyCmd | Out-Null
+        $exitCode = $LASTEXITCODE
+        Write-Log "Robocopy completed with exit code: $exitCode" -Level INFO
+    }
+    catch {
+        Write-Log "Robocopy exception: $_" -Level ERROR
+        return $false
+    }
     
-    $success = ($LASTEXITCODE -le 7)
+    $success = ($exitCode -le 7)
     
     if ($success) {
         # Verify integrity
