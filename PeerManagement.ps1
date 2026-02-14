@@ -1829,7 +1829,7 @@ function Invoke-JobsValidation {
                 $config = Get-RingConfig
                 if ($config -and $config.CustomerCode) {
                     # Get available storage peers
-                    $storagePeers = Get-StoragePeers
+                    $storagePeers = Get-StoragePeersList
                     if ($storagePeers -and $storagePeers.Count -gt 0) {
                         # Select minimum 2 peers (or all if fewer available)
                         $peersToUse = $storagePeers | Select-Object -First ([Math]::Min(2, $storagePeers.Count))
