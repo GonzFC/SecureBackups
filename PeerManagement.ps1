@@ -1839,7 +1839,7 @@ function Invoke-JobsValidation {
                             $peerDestinations += @{
                                 Hostname = $peer.Hostname
                                 TailscaleIP = $peer.TailscaleIP
-                                SharePath = "\\$($peer.TailscaleIP)\RR_Backups"
+                                BasePath = "\\$($peer.TailscaleIP)\RR_Backups"
                             }
                         }
                         

@@ -550,8 +550,10 @@ function Invoke-BackupToPeer {
     )
     
     $peerIP = $Peer.TailscaleIP
-    $basePath = $Peer.BasePath
-    $appName = $Job.AppNameClean
+    # Support both BasePath (correct) and SharePath (legacy/bug) property names
+    $basePath = if ($Peer.BasePath) { $Peer.BasePath } else { $Peer.SharePath }
+    # Fallback to AppName if AppNameClean not set
+    $appName = if ($Job.AppNameClean) { $Job.AppNameClean } else { $Job.AppName }
     
     Write-Log "Backing up to peer: $($Peer.Hostname) ($peerIP) - Type: $RetentionType" -Level INFO
     
