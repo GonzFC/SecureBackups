@@ -552,13 +552,15 @@ function Invoke-BackupToPeer {
     $peerIP = $Peer.TailscaleIP
     # Support both BasePath (correct) and SharePath (legacy/bug) property names
     $basePath = if ($Peer.BasePath) { $Peer.BasePath } else { $Peer.SharePath }
-    # Fallback to AppName if AppNameClean not set
-    $appName = if ($Job.AppNameClean) { $Job.AppNameClean } else { $Job.AppName }
+    # Fallback chain for app name: AppNameClean → AppName → JobName
+    $appName = if ($Job.AppNameClean) { $Job.AppNameClean } elseif ($Job.AppName) { $Job.AppName } else { $Job.JobName }
+    # CustomerCode from job, or fall back to ring-config
+    $customerCode = if ($Job.CustomerCode) { $Job.CustomerCode } else { (Get-RingConfig).CustomerCode }
     
     Write-Log "Backing up to peer: $($Peer.Hostname) ($peerIP) - Type: $RetentionType" -Level INFO
     
     # Connect to peer
-    if (-not (Connect-ToPeer -TailscaleIP $peerIP -CustomerCode $Job.CustomerCode)) {
+    if (-not (Connect-ToPeer -TailscaleIP $peerIP -CustomerCode $customerCode)) {
         Write-Log "Failed to connect to peer: $peerIP" -Level ERROR
         return $false
     }
