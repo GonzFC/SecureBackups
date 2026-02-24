@@ -1087,7 +1087,16 @@ function Add-StoragePeer {
     Write-Host "     in your Tailscale admin console: https://login.tailscale.com/admin/machines" -ForegroundColor Gray
     Write-Host "  2. Run 'Add Storage Peer' (P) on other machines with the SAME" -ForegroundColor White
     Write-Host "     Customer Code '$codename' to join this ring." -ForegroundColor Gray
-    
+
+    # Register hourly heartbeat task
+    Write-Host ""
+    Write-Host "Registering heartbeat task..." -ForegroundColor Gray -NoNewline
+    if (Register-HeartbeatTask) {
+        Write-Host " [OK]" -ForegroundColor Green
+    } else {
+        Write-Host " [WARN] Could not register - run manually later" -ForegroundColor Yellow
+    }
+
     Read-Host "`nPress Enter to continue"
 }
 
@@ -2109,6 +2118,172 @@ function Publish-NodeStatus {
         return $true
     }
     catch {
+        return $false
+    }
+}
+
+function Publish-Heartbeat {
+    <#
+    .SYNOPSIS
+        Publishes heartbeat to _nodeinfo/heartbeat.json on local share.
+        Called hourly by the VLABS_RR_Heartbeat scheduled task.
+    .DESCRIPTION
+        Writes a compact JSON file with: hostname, IP, version, timestamp,
+        location, customerCode, and current job statuses.
+        This is the single file the RRM reads to know a peer is alive and healthy.
+    #>
+    try {
+        $config = Get-RingConfig
+        if (-not $config -or -not $config.CustomerCode) {
+            Write-RRDebug "Publish-Heartbeat: No ring config found"
+            return $false
+        }
+
+        $storagePath = $config.StoragePath
+        if (-not $storagePath -or -not (Test-Path $storagePath)) {
+            Write-RRDebug "Publish-Heartbeat: StoragePath not accessible: $storagePath"
+            return $false
+        }
+
+        # Read version
+        $versionFile = "C:\VLABS_ResilienceRing\version.txt"
+        $version = if (Test-Path $versionFile) { (Get-Content $versionFile -Raw).Trim() } else { "unknown" }
+
+        # Get Tailscale IP
+        $tsIP = ""
+        try {
+            $tsStatus = tailscale status --json 2>$null | ConvertFrom-Json
+            $tsIP = $tsStatus.Self.TailscaleIPs[0]
+        }
+        catch { $tsIP = "" }
+
+        # Load jobs master data
+        $dataPath = Get-RRDataPath
+        $jobs = @()
+        $statusTable = @{}
+
+        $jobsFile = Join-Path $dataPath "jobs.json"
+        if (Test-Path $jobsFile) {
+            try {
+                $content = Get-Content $jobsFile -Raw | ConvertFrom-Json
+                if ($content -is [PSCustomObject] -and $content.PSObject.Properties.Name -contains 'value') {
+                    $content = $content.value
+                }
+                if ($content) { $jobs = @($content) }
+            }
+            catch { }
+        }
+
+        # Load transaction data (status)
+        $statusFile = Join-Path $dataPath "jobs-status.json"
+        if (Test-Path $statusFile) {
+            try {
+                $statusContent = Get-Content $statusFile -Raw | ConvertFrom-Json
+                if ($statusContent -is [PSCustomObject] -and $statusContent.PSObject.Properties.Name -contains 'value') {
+                    $statusContent = $statusContent.value
+                }
+                foreach ($s in @($statusContent)) {
+                    if ($s.JobName) { $statusTable[$s.JobName] = $s }
+                }
+            }
+            catch { }
+        }
+
+        # Build compact jobs summary
+        $heartbeatJobs = @()
+        foreach ($job in $jobs) {
+            $s = $statusTable[$job.JobName]
+            $heartbeatJobs += @{
+                name     = $job.JobName
+                lastRun  = if ($s) { $s.LastRun } else { $null }
+                status   = if ($s) { $s.LastStatus } else { "Never Run" }
+            }
+        }
+
+        # Build heartbeat object
+        $heartbeat = @{
+            hostname     = $env:COMPUTERNAME
+            ip           = $tsIP
+            version      = $version
+            ts           = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss")
+            location     = $config.Location
+            customerCode = $config.CustomerCode
+            jobs         = $heartbeatJobs
+        }
+
+        # Write to _nodeinfo on local share
+        $nodeInfoPath = Join-Path $storagePath "_nodeinfo"
+        if (-not (Test-Path $nodeInfoPath)) {
+            New-Item -Path $nodeInfoPath -ItemType Directory -Force | Out-Null
+        }
+
+        $heartbeatFile = Join-Path $nodeInfoPath "heartbeat.json"
+        ConvertTo-Json -InputObject $heartbeat -Depth 5 -Compress | Set-Content $heartbeatFile -Force
+
+        Write-RRDebug "Publish-Heartbeat: OK — $($heartbeatJobs.Count) job(s), ts=$($heartbeat.ts)"
+        return $true
+    }
+    catch {
+        Write-RRDebug "Publish-Heartbeat: ERROR — $_"
+        return $false
+    }
+}
+
+function Register-HeartbeatTask {
+    <#
+    .SYNOPSIS
+        Creates/updates the VLABS_RR_Heartbeat scheduled task.
+        Called during peer setup (Add Storage Peer).
+    .DESCRIPTION
+        Task runs Write-Heartbeat.ps1 every hour under SYSTEM account.
+        Starts immediately, repeats indefinitely every 60 minutes.
+    #>
+    $taskName = "VLABS_RR_Heartbeat"
+    $scriptPath = "C:\VLABS_ResilienceRing\Write-Heartbeat.ps1"
+
+    try {
+        # Remove existing task if present
+        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existing) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+
+        $action = New-ScheduledTaskAction `
+            -Execute "PowerShell.exe" `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+
+        # Trigger: start now, repeat every 1 hour for 9999 days
+        $trigger = New-ScheduledTaskTrigger `
+            -Once `
+            -At (Get-Date) `
+            -RepetitionInterval (New-TimeSpan -Hours 1) `
+            -RepetitionDuration (New-TimeSpan -Days 9999)
+
+        $settings = New-ScheduledTaskSettingsSet `
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+            -RestartCount 3 `
+            -RestartInterval (New-TimeSpan -Minutes 5) `
+            -StartWhenAvailable `
+            -RunOnlyIfNetworkAvailable
+
+        $principal = New-ScheduledTaskPrincipal `
+            -UserId "SYSTEM" `
+            -LogonType ServiceAccount `
+            -RunLevel Highest
+
+        Register-ScheduledTask `
+            -TaskName $taskName `
+            -Action $action `
+            -Trigger $trigger `
+            -Settings $settings `
+            -Principal $principal `
+            -Force | Out-Null
+
+        Write-RRDebug "Register-HeartbeatTask: Registered '$taskName' (hourly)"
+        return $true
+    }
+    catch {
+        Write-RRDebug "Register-HeartbeatTask: FAILED — $_"
         return $false
     }
 }

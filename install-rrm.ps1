@@ -137,6 +137,49 @@ if ($success) {
     Write-Host "Starting Resilience Ring Manager..." -ForegroundColor Cyan
     Write-Host ""
     
+    # Register background collector task
+    Write-Host "Registering collector task..." -ForegroundColor Gray -NoNewline
+    try {
+        $taskName   = "VLABS_RRM_Collector"
+        $scriptPath = Join-Path $InstallPath 'Run-Collector.ps1'
+
+        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existing) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+
+        $action = New-ScheduledTaskAction `
+            -Execute "PowerShell.exe" `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+
+        $trigger = New-ScheduledTaskTrigger `
+            -Once -At (Get-Date) `
+            -RepetitionInterval (New-TimeSpan -Hours 1) `
+            -RepetitionDuration (New-TimeSpan -Days 9999)
+
+        $settings = New-ScheduledTaskSettingsSet `
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
+            -StartWhenAvailable -RunOnlyIfNetworkAvailable
+
+        $principal = New-ScheduledTaskPrincipal `
+            -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+
+        Register-ScheduledTask `
+            -TaskName $taskName -Action $action -Trigger $trigger `
+            -Settings $settings -Principal $principal -Force | Out-Null
+
+        Write-Host " [OK]" -ForegroundColor Green
+    }
+    catch {
+        Write-Host " [WARN] $_" -ForegroundColor Yellow
+    }
+
+    # Create history directory
+    $historyPath = Join-Path $DataPath 'history'
+    if (-not (Test-Path $historyPath)) {
+        New-Item -Path $historyPath -ItemType Directory -Force | Out-Null
+    }
+
     # Launch the manager
     $managerScript = Join-Path $InstallPath 'ResilienceRingManager.ps1'
     if (Test-Path $managerScript) {

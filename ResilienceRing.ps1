@@ -639,6 +639,11 @@ if (Get-Command 'Publish-NodeStatus' -ErrorAction SilentlyContinue) {
     }
 }
 
+# Publish heartbeat (liveness + job status for RRM collector)
+if (Get-Command 'Publish-Heartbeat' -ErrorAction SilentlyContinue) {
+    Publish-Heartbeat | Out-Null
+}
+
 Write-Host ""
 Write-Host "Press any key to continue..." -ForegroundColor Gray
 $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')

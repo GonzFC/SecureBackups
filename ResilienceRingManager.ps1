@@ -21,7 +21,8 @@
 
 [CmdletBinding()]
 param(
-    [switch]$SkipUpdateCheck
+    [switch]$SkipUpdateCheck,
+    [switch]$CollectorMode   # Run background collector and exit (no TUI)
 )
 
 # Version and repository information
@@ -1523,6 +1524,271 @@ function Show-RingSelector {
 
 #endregion
 
+#region Background Collector
+
+function Save-CollectorRecord {
+    <#
+    .SYNOPSIS
+        Appends a single heartbeat record to the current month's JSONL file.
+    .DESCRIPTION
+        Files: C:\ProgramData\VLABS_RRM\history\YYYY-MM.jsonl
+        One JSON object per line. Append-only. No locking needed (single writer).
+    #>
+    param($Record)
+
+    try {
+        $historyPath = Join-Path $script:DataPath "history"
+        if (-not (Test-Path $historyPath)) {
+            New-Item -Path $historyPath -ItemType Directory -Force | Out-Null
+        }
+
+        $monthFile = Join-Path $historyPath "$(Get-Date -Format 'yyyy-MM').jsonl"
+        $line = ConvertTo-Json -InputObject $Record -Depth 5 -Compress
+        Add-Content -Path $monthFile -Value $line -Encoding UTF8
+    }
+    catch {
+        # Non-fatal — log and continue
+        $logFile = Join-Path $script:DataPath "collector.log"
+        "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | Save-CollectorRecord ERROR: $_" |
+            Add-Content -Path $logFile -Encoding UTF8 -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-HistoryMaintenance {
+    <#
+    .SYNOPSIS
+        Compresses previous months' JSONL files and prunes records older than 12 months.
+    .DESCRIPTION
+        - Previous months: .jsonl → .jsonl.gz (compressed, kept)
+        - Files older than 12 months: deleted
+    #>
+    try {
+        $historyPath = Join-Path $script:DataPath "history"
+        if (-not (Test-Path $historyPath)) { return }
+
+        $currentMonth = Get-Date -Format "yyyy-MM"
+        $cutoffDate = (Get-Date).AddMonths(-12)
+
+        Get-ChildItem -Path $historyPath -Filter "*.jsonl" | ForEach-Object {
+            $fileMonth = $_.BaseName  # e.g. "2026-01"
+
+            # Skip current month — still being written
+            if ($fileMonth -eq $currentMonth) { return }
+
+            # Delete if older than 12 months
+            try {
+                $fileDate = [datetime]::ParseExact($fileMonth, "yyyy-MM", $null)
+                if ($fileDate -lt $cutoffDate) {
+                    Remove-Item $_.FullName -Force
+                    return
+                }
+            }
+            catch { }
+
+            # Compress to .jsonl.gz
+            $gzPath = $_.FullName + ".gz"
+            if (-not (Test-Path $gzPath)) {
+                try {
+                    $srcStream  = [System.IO.File]::OpenRead($_.FullName)
+                    $dstStream  = [System.IO.File]::Create($gzPath)
+                    $gzStream   = [System.IO.Compression.GZipStream]::new($dstStream, [System.IO.Compression.CompressionMode]::Compress)
+                    $srcStream.CopyTo($gzStream)
+                    $gzStream.Close(); $dstStream.Close(); $srcStream.Close()
+                    Remove-Item $_.FullName -Force  # Remove uncompressed after successful gzip
+                }
+                catch {
+                    # Clean up partial gz if compression failed
+                    if (Test-Path $gzPath) { Remove-Item $gzPath -Force -ErrorAction SilentlyContinue }
+                }
+            }
+        }
+
+        # Delete .jsonl.gz files older than 12 months
+        Get-ChildItem -Path $historyPath -Filter "*.jsonl.gz" | ForEach-Object {
+            $fileMonth = $_.Name -replace '\.jsonl\.gz$', ''
+            try {
+                $fileDate = [datetime]::ParseExact($fileMonth, "yyyy-MM", $null)
+                if ($fileDate -lt $cutoffDate) {
+                    Remove-Item $_.FullName -Force
+                }
+            }
+            catch { }
+        }
+    }
+    catch { }
+}
+
+function Invoke-RingCollector {
+    <#
+    .SYNOPSIS
+        Polls all peers across all rings, reads heartbeat.json, appends to JSONL history.
+    .DESCRIPTION
+        Runs hourly via VLABS_RRM_Collector scheduled task.
+        Each peer's heartbeat is one JSONL record with collection timestamp added.
+        Unreachable peers are recorded as {status: "offline"}.
+        After collection, runs history maintenance (compress/prune).
+    #>
+    $logFile = Join-Path $script:DataPath "collector.log"
+    $collectedTs = Get-Date -Format "yyyy-MM-ddTHH:mm:ss"
+
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | === Collector run started ===" |
+        Add-Content -Path $logFile -Encoding UTF8 -ErrorAction SilentlyContinue
+
+    # Load all configured rings
+    $rings = @()
+    try {
+        if (Test-Path $script:RingsFile) {
+            $content = Get-Content $script:RingsFile -Raw | ConvertFrom-Json
+            if ($content) { $rings = @($content) }
+        }
+    }
+    catch { }
+
+    if ($rings.Count -eq 0) {
+        "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | No rings configured — exiting" |
+            Add-Content -Path $logFile -Encoding UTF8 -ErrorAction SilentlyContinue
+        return
+    }
+
+    $totalPeers = 0
+    $reachable  = 0
+
+    foreach ($ring in $rings) {
+        if (-not $ring.Tag -or -not $ring.CustomerCode) { continue }
+
+        # Discover peers for this ring
+        $peers = @()
+        try { $peers = @(Get-TailscalePeersByTag -Tag $ring.Tag) }
+        catch { continue }
+
+        foreach ($peer in $peers) {
+            $totalPeers++
+            $sharePath = "\\$($peer.TailscaleIP)\RR_Backups"
+
+            try {
+                # Connect
+                $password = Get-RRMServicePassword -CustomerCode $ring.CustomerCode
+                $netResult = cmd /c "net use `"$sharePath`" /user:RR_Service `"$password`" 2>&1"
+
+                if ($LASTEXITCODE -ne 0) {
+                    # Record as offline
+                    Save-CollectorRecord @{
+                        collectedTs  = $collectedTs
+                        ringName     = $ring.Name
+                        hostname     = $peer.HostName
+                        ip           = $peer.TailscaleIP
+                        reachable    = $false
+                    }
+                    continue
+                }
+
+                # Read heartbeat.json
+                $heartbeatFile = Join-Path $sharePath "_nodeinfo\heartbeat.json"
+                if (Test-Path $heartbeatFile) {
+                    $hb = Get-Content $heartbeatFile -Raw | ConvertFrom-Json
+
+                    # Build JSONL record
+                    $record = @{
+                        collectedTs  = $collectedTs
+                        ringName     = $ring.Name
+                        reachable    = $true
+                        hostname     = if ($hb.hostname) { $hb.hostname } else { $peer.HostName }
+                        ip           = $peer.TailscaleIP
+                        version      = $hb.version
+                        peerTs       = $hb.ts
+                        location     = $hb.location
+                        customerCode = $hb.customerCode
+                        jobs         = $hb.jobs
+                    }
+
+                    Save-CollectorRecord $record
+                    $reachable++
+                }
+                else {
+                    # Peer reachable but no heartbeat file yet (new peer)
+                    Save-CollectorRecord @{
+                        collectedTs  = $collectedTs
+                        ringName     = $ring.Name
+                        hostname     = $peer.HostName
+                        ip           = $peer.TailscaleIP
+                        reachable    = $true
+                        version      = "unknown"
+                        peerTs       = $null
+                        jobs         = @()
+                    }
+                    $reachable++
+                }
+            }
+            catch { }
+            finally {
+                try { cmd /c "net use `"$sharePath`" /delete 2>&1" | Out-Null } catch { }
+            }
+        }
+    }
+
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | Collection done: $reachable/$totalPeers peers reached" |
+        Add-Content -Path $logFile -Encoding UTF8 -ErrorAction SilentlyContinue
+
+    # Maintain history (compress old months, prune >12 months)
+    Invoke-HistoryMaintenance
+}
+
+function Register-CollectorTask {
+    <#
+    .SYNOPSIS
+        Creates/updates the VLABS_RRM_Collector scheduled task.
+        Called during RRM install.
+    .DESCRIPTION
+        Task runs Run-Collector.ps1 every hour under SYSTEM account.
+    #>
+    $taskName   = "VLABS_RRM_Collector"
+    $scriptPath = "C:\VLABS_ResilienceRingManager\Run-Collector.ps1"
+
+    try {
+        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existing) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+
+        $action = New-ScheduledTaskAction `
+            -Execute "PowerShell.exe" `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+
+        $trigger = New-ScheduledTaskTrigger `
+            -Once `
+            -At (Get-Date) `
+            -RepetitionInterval (New-TimeSpan -Hours 1) `
+            -RepetitionDuration (New-TimeSpan -Days 9999)
+
+        $settings = New-ScheduledTaskSettingsSet `
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
+            -RestartCount 3 `
+            -RestartInterval (New-TimeSpan -Minutes 5) `
+            -StartWhenAvailable `
+            -RunOnlyIfNetworkAvailable
+
+        $principal = New-ScheduledTaskPrincipal `
+            -UserId "SYSTEM" `
+            -LogonType ServiceAccount `
+            -RunLevel Highest
+
+        Register-ScheduledTask `
+            -TaskName $taskName `
+            -Action $action `
+            -Trigger $trigger `
+            -Settings $settings `
+            -Principal $principal `
+            -Force | Out-Null
+
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+#endregion
+
 #region Main Menu
 
 function Show-MainMenu {
@@ -1663,6 +1929,12 @@ for ($i = 0; $i -lt $rings.Count; $i++) {
         Save-Rings -Rings $rings
         break
     }
+}
+
+if ($CollectorMode) {
+    # Run headless collector and exit — no TUI
+    Invoke-RingCollector
+    exit 0
 }
 
 Write-Host ""
