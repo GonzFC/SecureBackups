@@ -281,9 +281,15 @@ function Save-Jobs {
 
     try {
         # Strip transaction data properties before saving master data
-        $masterDataProperties = @('JobName', 'BackupType', 'BackupObject', 'TargetPeers', 
-                                   'Schedule', 'StartHour', 'Retention', 'RetentionMonthly', 
-                                   'RetentionWeekly', 'RetentionRecent', 'TaskName', 'Enabled')
+        $masterDataProperties = @(
+            'JobName', 'AppName', 'AppNameClean',
+            'BackupType', 'BackupObject',
+            'CustomerCode', 'SourceLocation',
+            'Frequency', 'StartHour',
+            'Retention', 'RetentionMonthly', 'RetentionWeekly', 'RetentionRecent',
+            'PeerDestinations', 'TargetPeers', 'Schedule',
+            'TaskName', 'Enabled', 'CreatedDate'
+        )
         
         $cleanJobs = @()
         foreach ($job in $Jobs) {
@@ -1610,9 +1616,9 @@ function Edit-BackupJob {
                 }
                 
                 if ($valid) {
-                    $jobs[$index].RetentionMonthly = [int]$newMonthly
-                    $jobs[$index].RetentionWeekly = [int]$newWeekly
-                    $jobs[$index].RetentionRecent = [int]$newRecent
+                    $jobs[$index] | Add-Member -NotePropertyName 'RetentionMonthly' -NotePropertyValue ([int]$newMonthly) -Force
+                    $jobs[$index] | Add-Member -NotePropertyName 'RetentionWeekly'  -NotePropertyValue ([int]$newWeekly)  -Force
+                    $jobs[$index] | Add-Member -NotePropertyName 'RetentionRecent'  -NotePropertyValue ([int]$newRecent)  -Force
                     Write-Host "`nRetention updated!" -ForegroundColor Green
                 }
             }
@@ -1620,7 +1626,7 @@ function Edit-BackupJob {
                 Write-Host "Current: $($job.Retention) copies" -ForegroundColor Gray
                 $newRetention = Read-Host "Enter new retention (number of copies to keep)"
                 if (($newRetention -as [int]) -and [int]$newRetention -gt 0) {
-                    $jobs[$index].Retention = [int]$newRetention
+                    $jobs[$index] | Add-Member -NotePropertyName 'Retention' -NotePropertyValue ([int]$newRetention) -Force
                     Write-Host "`nRetention updated!" -ForegroundColor Green
                 }
                 else {
@@ -1640,8 +1646,8 @@ function Edit-BackupJob {
             if (($newFrequency -as [int]) -ge 1 -and ($newFrequency -as [int]) -le 24 -and
                 ($newStartHour -as [int]) -ge 0 -and ($newStartHour -as [int]) -le 23) {
 
-                $jobs[$index].Frequency = [int]$newFrequency
-                $jobs[$index].StartHour = [int]$newStartHour
+                $jobs[$index] | Add-Member -NotePropertyName 'Frequency' -NotePropertyValue ([int]$newFrequency) -Force
+                $jobs[$index] | Add-Member -NotePropertyName 'StartHour' -NotePropertyValue ([int]$newStartHour) -Force
 
                 # Recreate scheduled task
                 Write-Host "Updating scheduled task..." -ForegroundColor Gray
@@ -1654,7 +1660,8 @@ function Edit-BackupJob {
             }
         }
         "3" {
-            $jobs[$index].Enabled = -not ($jobs[$index].Enabled -ne $false)
+            $newEnabled = -not ($jobs[$index].Enabled -ne $false)
+            $jobs[$index] | Add-Member -NotePropertyName 'Enabled' -NotePropertyValue $newEnabled -Force
             $status = if ($jobs[$index].Enabled) { "enabled" } else { "disabled" }
 
             # Enable or disable the scheduled task
@@ -1680,14 +1687,14 @@ function Edit-BackupJob {
             
             if (-not [string]::IsNullOrWhiteSpace($newPath)) {
                 if (Test-Path $newPath) {
-                    $jobs[$index].BackupObject = $newPath
+                    $jobs[$index] | Add-Member -NotePropertyName 'BackupObject' -NotePropertyValue $newPath -Force
                     Write-Host "`nSource path updated!" -ForegroundColor Green
                 }
                 else {
                     Write-Host "`nWarning: Path does not exist!" -ForegroundColor Yellow
                     $confirm = Read-Host "Save anyway? (yes/no)"
                     if ($confirm -eq "yes") {
-                        $jobs[$index].BackupObject = $newPath
+                        $jobs[$index] | Add-Member -NotePropertyName 'BackupObject' -NotePropertyValue $newPath -Force
                         Write-Host "`nSource path updated!" -ForegroundColor Green
                     }
                 }
