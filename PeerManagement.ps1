@@ -1813,7 +1813,54 @@ function Invoke-JobsValidation {
             $modified = $true
             $result.JobsMigrated++
         }
-        
+
+        # AUTO-HEAL: Frequency and StartHour stripped by bug (masterDataProperties was incomplete)
+        # Recovery strategy: read values from the actual scheduled task trigger (source of truth)
+        # Fallback: safe defaults (6h frequency, start at 3:00)
+        $needsFrequencyHeal = (-not $job.Frequency -or $job.Frequency -eq 0)
+        $needsStartHourHeal = ($null -eq $job.StartHour)
+        if ($needsFrequencyHeal -or $needsStartHourHeal) {
+            $healedFrequency = $null
+            $healedStartHour = $null
+
+            # Try to read from scheduled task trigger
+            try {
+                $healTaskName = if ($job.TaskName) { $job.TaskName } else { "VLABS_Backup_$($job.JobName)" }
+                $healTask = Get-ScheduledTask -TaskName $healTaskName -ErrorAction SilentlyContinue
+                if ($healTask -and $healTask.Triggers -and $healTask.Triggers.Count -gt 0) {
+                    $trigger = $healTask.Triggers[0]
+
+                    # Parse repetition interval: "PT6H" → 6, "PT12H" → 12
+                    $interval = $trigger.Repetition.Interval
+                    if ($interval -match 'PT(\d+)H') {
+                        $healedFrequency = [int]$matches[1]
+                    }
+
+                    # Parse start hour from StartBoundary: "2026-02-14T03:00:00"
+                    if ($trigger.StartBoundary -match 'T(\d+):') {
+                        $healedStartHour = [int]$matches[1]
+                    }
+                }
+            }
+            catch { }
+
+            # Apply healed values (or safe defaults if task not readable)
+            if ($needsFrequencyHeal) {
+                $freq = if ($null -ne $healedFrequency) { $healedFrequency } else { 6 }
+                $jobs[$i] | Add-Member -NotePropertyName 'Frequency' -NotePropertyValue $freq -Force
+                $modified = $true
+                $result.JobsRepaired++
+                Write-RRDebug "Auto-healed Frequency for '$($job.JobName)': $freq h (from $(if ($null -ne $healedFrequency) {'task'} else {'default'}))"
+            }
+            if ($needsStartHourHeal) {
+                $hour = if ($null -ne $healedStartHour) { $healedStartHour } else { 3 }
+                $jobs[$i] | Add-Member -NotePropertyName 'StartHour' -NotePropertyValue $hour -Force
+                $modified = $true
+                $result.JobsRepaired++
+                Write-RRDebug "Auto-healed StartHour for '$($job.JobName)': $hour (from $(if ($null -ne $healedStartHour) {'task'} else {'default'}))"
+            }
+        }
+
         # AUTO-FIX: Jobs without valid destination configuration
         # This is NOT a user responsibility - app must fix silently
         $hasValidDestination = ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) -or 
