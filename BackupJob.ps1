@@ -90,12 +90,13 @@ function Get-PeerStorageUsage {
         $connected = Connect-RingShare -TailscaleIP $TailscaleIP -CustomerCode $CustomerCode
         if (-not $connected) { return $null }
         
-        # Get folder size
-        $customerPath = Join-Path $sharePath $CustomerCode.ToUpper()
+        # Measure the whole shared storage root because the configured quota
+        # applies to the backup folder, not just one customer subfolder.
+        $storageRoot = $sharePath
         $usedBytes = 0
         
-        if (Test-Path $customerPath) {
-            $usedBytes = (Get-ChildItem $customerPath -Recurse -ErrorAction SilentlyContinue | 
+        if (Test-Path $storageRoot) {
+            $usedBytes = (Get-ChildItem $storageRoot -Recurse -ErrorAction SilentlyContinue | 
                          Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
         }
         
@@ -154,7 +155,11 @@ function Select-BackupPeers {
         
         $usedGB = if ($usage) { $usage.UsedGB } else { 0 }
         $quotaGB = if ($peer.QuotaGB) { $peer.QuotaGB } else { 100 }
-        $usedPct = [math]::Round(($usedGB / $quotaGB) * 100, 1)
+        $usedPct = if ($quotaGB -gt 0) {
+            [math]::Round(($usedGB / $quotaGB) * 100, 1)
+        } else {
+            100
+        }
         
         $peersWithUsage += [PSCustomObject]@{
             Hostname = $peer.Hostname
@@ -163,6 +168,7 @@ function Select-BackupPeers {
             QuotaGB = $quotaGB
             UsedGB = $usedGB
             UsedPct = $usedPct
+            RemainingGB = [math]::Max(0, [math]::Round($quotaGB - $usedGB, 2))
             PingMs = $peer.PingMs
         }
     }
@@ -171,12 +177,15 @@ function Select-BackupPeers {
     # Sort by usage percentage (prefer least used)
     $sortedPeers = $peersWithUsage | Sort-Object UsedPct
     
+    # Never preselect peers that are already at or above quota.
+    $eligiblePeers = $sortedPeers | Where-Object { $_.UsedPct -lt 100 }
+    
     # Select peers:
     # - First, try to use peers under 70% capacity
-    # - If not enough, use larger peers
+    # - If not enough, use larger peers that still have remaining quota
     $selectedPeers = @()
-    $peersUnder70 = $sortedPeers | Where-Object { $_.UsedPct -lt 70 }
-    $peersOver70 = $sortedPeers | Where-Object { $_.UsedPct -ge 70 } | Sort-Object QuotaGB -Descending
+    $peersUnder70 = $eligiblePeers | Where-Object { $_.UsedPct -lt 70 }
+    $peersOver70 = $eligiblePeers | Where-Object { $_.UsedPct -ge 70 } | Sort-Object QuotaGB -Descending
     
     # Take from under-70% first
     foreach ($peer in $peersUnder70) {
