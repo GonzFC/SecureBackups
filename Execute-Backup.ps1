@@ -535,6 +535,213 @@ function Disconnect-FromPeer {
 
 #endregion
 
+#region Quota Enforcement
+
+function Get-BackupSourceSizeBytes {
+    param($Job)
+    
+    try {
+        if ($Job.BackupType -eq 'F') {
+            $file = Get-Item $Job.BackupObject -ErrorAction Stop
+            return [int64]$file.Length
+        }
+        
+        $size = (Get-ChildItem $Job.BackupObject -Recurse -File -ErrorAction SilentlyContinue |
+                 Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+        $result = if ($size) { $size } else { 0 }
+        return [int64]$result
+    }
+    catch {
+        return 0
+    }
+}
+
+function Get-PeerQuotaGB {
+    param(
+        [string]$TailscaleIP,
+        [double]$FallbackQuotaGB = 0
+    )
+    
+    $peer = @(Get-StoragePeersList) | Where-Object { $_.TailscaleIP -eq $TailscaleIP } | Select-Object -First 1
+    if ($peer -and $peer.QuotaGB) {
+        return [double]$peer.QuotaGB
+    }
+    
+    return [double]$FallbackQuotaGB
+}
+
+function Get-PeerStorageUsageBytes {
+    param(
+        [string]$TailscaleIP,
+        [string]$CustomerCode
+    )
+    
+    $sharePath = "\\$TailscaleIP\$(Get-RRShareName)"
+    
+    try {
+        $connected = Connect-ToPeer -TailscaleIP $TailscaleIP -CustomerCode $CustomerCode
+        if (-not $connected) {
+            return $null
+        }
+        
+        $usedBytes = 0
+        if (Test-Path $sharePath) {
+            $usedBytes = (Get-ChildItem $sharePath -Recurse -ErrorAction SilentlyContinue |
+                          Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+        }
+        
+        $result = if ($usedBytes) { $usedBytes } else { 0 }
+        return [int64]$result
+    }
+    catch {
+        return $null
+    }
+    finally {
+        Disconnect-FromPeer -TailscaleIP $TailscaleIP
+    }
+}
+
+function Get-PeerTypeFolder {
+    param([string]$BackupType)
+    
+    switch ($BackupType) {
+        'F' { return 'file' }
+        'D' { return 'directory' }
+        'SQL' { return 'database' }
+        default { return $BackupType.ToLower() }
+    }
+}
+
+function New-PeerExecutionDescriptor {
+    param(
+        $Peer,
+        $Job,
+        [double]$QuotaGB
+    )
+    
+    $appName = if ($Job.AppNameClean) { $Job.AppNameClean } elseif ($Job.AppName) { $Job.AppName } else { $Job.JobName }
+    $location = if ($Job.SourceLocation) { $Job.SourceLocation } else { (Get-RingConfig).Location }
+    $customerCode = if ($Job.CustomerCode) { $Job.CustomerCode } else { (Get-RingConfig).CustomerCode }
+    $typeFolder = Get-PeerTypeFolder -BackupType $Job.BackupType
+    
+    return [PSCustomObject]@{
+        TailscaleIP = $Peer.TailscaleIP
+        Hostname = $Peer.Hostname
+        Location = $Peer.Location
+        QuotaGB = $QuotaGB
+        BasePath = "\\$($Peer.TailscaleIP)\$(Get-RRShareName)\$($customerCode.ToUpper())\$location\$appName\$typeFolder"
+    }
+}
+
+function Test-PeerQuotaCapacity {
+    param(
+        $Peer,
+        $Job,
+        [int64]$EstimatedBackupBytes
+    )
+    
+    $customerCode = if ($Job.CustomerCode) { $Job.CustomerCode } else { (Get-RingConfig).CustomerCode }
+    $quotaGB = Get-PeerQuotaGB -TailscaleIP $Peer.TailscaleIP -FallbackQuotaGB $Peer.QuotaGB
+    
+    if ($quotaGB -le 0) {
+        Write-Log "Peer $($Peer.Hostname) has no valid quota metadata; skipping quota enforcement for this peer." -Level WARNING
+        return [PSCustomObject]@{
+            Allowed = $true
+            Descriptor = (New-PeerExecutionDescriptor -Peer $Peer -Job $Job -QuotaGB $quotaGB)
+        }
+    }
+    
+    $usedBytes = Get-PeerStorageUsageBytes -TailscaleIP $Peer.TailscaleIP -CustomerCode $customerCode
+    if ($null -eq $usedBytes) {
+        Write-Log "Could not determine current usage for peer $($Peer.Hostname); skipping peer." -Level WARNING
+        return [PSCustomObject]@{
+            Allowed = $false
+            Reason = "Usage unavailable"
+        }
+    }
+    
+    $quotaBytes = [int64]($quotaGB * 1GB)
+    $projectedBytes = $usedBytes + $EstimatedBackupBytes
+    
+    if ($projectedBytes -gt $quotaBytes) {
+        $usedGB = [math]::Round($usedBytes / 1GB, 2)
+        $projectedGB = [math]::Round($projectedBytes / 1GB, 2)
+        Write-Log "Skipping peer $($Peer.Hostname): projected usage $projectedGB GB exceeds quota $quotaGB GB (current $usedGB GB)." -Level WARNING
+        return [PSCustomObject]@{
+            Allowed = $false
+            Reason = "Quota exceeded"
+            UsedBytes = $usedBytes
+            QuotaBytes = $quotaBytes
+        }
+    }
+    
+    return [PSCustomObject]@{
+        Allowed = $true
+        UsedBytes = $usedBytes
+        QuotaBytes = $quotaBytes
+        Descriptor = (New-PeerExecutionDescriptor -Peer $Peer -Job $Job -QuotaGB $quotaGB)
+    }
+}
+
+function Resolve-ExecutionPeers {
+    param($Job)
+    
+    $requiredPeers = if ($Job.PeerDestinations -and $Job.PeerDestinations.Count -gt 0) {
+        $Job.PeerDestinations.Count
+    } else {
+        2
+    }
+    
+    $estimatedBackupBytes = Get-BackupSourceSizeBytes -Job $Job
+    $preferredByIp = @{}
+    foreach ($peer in @($Job.PeerDestinations)) {
+        if ($peer.TailscaleIP) {
+            $preferredByIp[$peer.TailscaleIP] = $true
+        }
+    }
+    
+    $availablePeers = @(Get-AvailableStoragePeers)
+    $availableByIp = @{}
+    foreach ($peer in $availablePeers) {
+        $availableByIp[$peer.TailscaleIP] = $peer
+    }
+    
+    $resolvedPeers = @()
+    $selectedIps = @{}
+    
+    foreach ($peer in @($Job.PeerDestinations)) {
+        $candidate = if ($availableByIp.ContainsKey($peer.TailscaleIP)) { $availableByIp[$peer.TailscaleIP] } else { $peer }
+        $capacity = Test-PeerQuotaCapacity -Peer $candidate -Job $Job -EstimatedBackupBytes $estimatedBackupBytes
+        if ($capacity.Allowed) {
+            $resolvedPeers += $capacity.Descriptor
+            $selectedIps[$candidate.TailscaleIP] = $true
+        }
+    }
+    
+    if ($resolvedPeers.Count -lt $requiredPeers) {
+        Write-Log "Trying alternate peers because one or more configured destinations have no remaining quota." -Level WARNING
+    }
+    
+    $alternatePeers = $availablePeers | Where-Object {
+        -not $selectedIps.ContainsKey($_.TailscaleIP) -and -not $preferredByIp.ContainsKey($_.TailscaleIP)
+    }
+    
+    foreach ($peer in $alternatePeers) {
+        if ($resolvedPeers.Count -ge $requiredPeers) { break }
+        
+        $capacity = Test-PeerQuotaCapacity -Peer $peer -Job $Job -EstimatedBackupBytes $estimatedBackupBytes
+        if ($capacity.Allowed) {
+            Write-Log "Using alternate peer $($peer.Hostname) for this run." -Level WARNING
+            $resolvedPeers += $capacity.Descriptor
+            $selectedIps[$peer.TailscaleIP] = $true
+        }
+    }
+    
+    return $resolvedPeers
+}
+
+#endregion
+
 #region Backup Execution
 
 function Invoke-BackupToPeer {
@@ -689,12 +896,22 @@ function Invoke-UnifiedBackup {
         return $false
     }
     
+    $executionPeers = @(Resolve-ExecutionPeers -Job $Job)
+    if ($executionPeers.Count -eq 0) {
+        Write-Log "No peers have enough remaining quota for this backup run." -Level ERROR
+        return $false
+    }
+    
+    if ($Job.PeerDestinations -and $executionPeers.Count -lt $Job.PeerDestinations.Count) {
+        Write-Log "Only $($executionPeers.Count) peer(s) have enough quota for this run; backup will continue with reduced redundancy." -Level WARNING
+    }
+    
     # Track results
-    $totalPeers = $Job.PeerDestinations.Count
+    $totalPeers = $executionPeers.Count
     $successPeers = 0
     
     # Backup to each peer
-    foreach ($peer in $Job.PeerDestinations) {
+    foreach ($peer in $executionPeers) {
         # For each retention type that applies today
         foreach ($retentionType in $retentionTypes) {
             # Skip monthly/weekly if retention count is 0

@@ -57,6 +57,7 @@ This creates:
 - Local service account `RR_Service` for SMB access
 - SMB share `RR_Backups` with proper permissions
 - Registration in the peer mesh
+- Runtime quota metadata used to enforce the maximum backup size on every execution
 
 ### 2. Discover Peers (D)
 
@@ -101,6 +102,17 @@ Backups are **automatically distributed** to at least 2 remote peers:
 2. **Even Distribution** - Selects peers with lowest storage usage
 3. **Capacity Aware** - Only uses larger peers when smaller ones hit 70%
 4. **Auto-Failover** - If a peer is offline, uses next best available
+
+## Storage Quota Enforcement
+
+`Storage Quota` is enforced at runtime, not just during setup:
+
+- The system recalculates current usage of each peer before every backup run.
+- If `current usage + estimated backup size > QuotaGB`, that peer is skipped for that execution.
+- If a configured peer no longer has capacity, the system tries to use another available peer with remaining quota.
+- If no peer has enough capacity, the backup fails instead of filling the destination drive.
+
+This keeps the configured backup folder from growing past the maximum logical size defined for the peer.
 
 ## File Structure
 
