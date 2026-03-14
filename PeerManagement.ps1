@@ -1448,6 +1448,437 @@ function Get-AvailableStoragePeers {
     return $availablePeers | Sort-Object PingMs
 }
 
+#region Storage Rebalancing
+
+function Get-RebalancePathSizeBytes {
+    param([string]$Path)
+    
+    if (-not (Test-Path $Path)) { return [int64]0 }
+    
+    $size = (Get-ChildItem $Path -Recurse -ErrorAction SilentlyContinue |
+             Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+    if ($size) { return [int64]$size }
+    return [int64]0
+}
+
+function Open-RebalancePeerRoot {
+    param(
+        $Peer,
+        [string]$CustomerCode
+    )
+    
+    if ($Peer.IsLocal) {
+        if (Test-Path $Peer.RootPath) { return $Peer.RootPath }
+        return $null
+    }
+    
+    $connected = Connect-RingShare -TailscaleIP $Peer.TailscaleIP -CustomerCode $CustomerCode
+    if (-not $connected) {
+        return $null
+    }
+    
+    if (Test-Path $Peer.RootPath -ErrorAction SilentlyContinue) {
+        return $Peer.RootPath
+    }
+    
+    Disconnect-RingShare -TailscaleIP $Peer.TailscaleIP
+    return $null
+}
+
+function Close-RebalancePeerRoot {
+    param($Peer)
+    
+    if (-not $Peer.IsLocal) {
+        Disconnect-RingShare -TailscaleIP $Peer.TailscaleIP
+    }
+}
+
+function Get-RebalancePeerCatalog {
+    <#
+    .SYNOPSIS
+        Returns all known peers with current usage and quota information
+    #>
+    $config = Get-RingConfig
+    if (-not $config -or -not $config.CustomerCode) {
+        return @()
+    }
+    
+    $peerTable = @{}
+    foreach ($peer in @(Get-StoragePeersList)) {
+        if (-not $peer.TailscaleIP) { continue }
+        
+        $peerTable[$peer.TailscaleIP] = [PSCustomObject]@{
+            Hostname = $peer.Hostname
+            TailscaleIP = $peer.TailscaleIP
+            Location = $peer.Location
+            CustomerCode = $peer.CustomerCode
+            QuotaGB = if ($peer.QuotaGB) { [double]$peer.QuotaGB } else { 0 }
+        }
+    }
+    
+    if ($config.TailscaleIP) {
+        $existing = $peerTable[$config.TailscaleIP]
+        if (-not $existing) {
+            $existing = [PSCustomObject]@{
+                Hostname = $config.Hostname
+                TailscaleIP = $config.TailscaleIP
+                Location = $config.Location
+                CustomerCode = $config.CustomerCode
+                QuotaGB = if ($config.QuotaGB) { [double]$config.QuotaGB } else { 0 }
+            }
+            $peerTable[$config.TailscaleIP] = $existing
+        }
+        elseif ((-not $existing.QuotaGB) -and $config.QuotaGB) {
+            $existing.QuotaGB = [double]$config.QuotaGB
+        }
+    }
+    
+    $catalog = @()
+    foreach ($peer in $peerTable.Values) {
+        $isLocal = ($config.TailscaleIP -and $peer.TailscaleIP -eq $config.TailscaleIP)
+        $rootPath = if ($isLocal) { $config.StoragePath } else { "\\$($peer.TailscaleIP)\$(Get-RRShareName)" }
+        
+        $entry = [PSCustomObject]@{
+            Hostname = $peer.Hostname
+            TailscaleIP = $peer.TailscaleIP
+            Location = $peer.Location
+            CustomerCode = $peer.CustomerCode
+            QuotaGB = $peer.QuotaGB
+            QuotaBytes = if ($peer.QuotaGB -gt 0) { [int64]($peer.QuotaGB * 1GB) } else { [int64]0 }
+            IsLocal = $isLocal
+            RootPath = $rootPath
+            Accessible = $false
+            UsedBytes = [int64]0
+            UsedGB = 0
+            RemainingBytes = [int64]0
+            ExcessBytes = [int64]0
+        }
+        
+        $openedPath = Open-RebalancePeerRoot -Peer $entry -CustomerCode $config.CustomerCode
+        if ($openedPath) {
+            try {
+                $entry.Accessible = $true
+                $entry.UsedBytes = Get-RebalancePathSizeBytes -Path $openedPath
+                $entry.UsedGB = [math]::Round($entry.UsedBytes / 1GB, 2)
+                if ($entry.QuotaBytes -gt 0) {
+                    $entry.RemainingBytes = [math]::Max([int64]0, [int64]($entry.QuotaBytes - $entry.UsedBytes))
+                    $entry.ExcessBytes = [math]::Max([int64]0, [int64]($entry.UsedBytes - $entry.QuotaBytes))
+                }
+            }
+            finally {
+                Close-RebalancePeerRoot -Peer $entry
+            }
+        }
+        
+        $catalog += $entry
+    }
+    
+    return $catalog | Sort-Object Hostname
+}
+
+function Get-RebalanceFolderStats {
+    param([string]$Path)
+    
+    if (-not (Test-Path $Path)) {
+        return [PSCustomObject]@{ FileCount = 0; TotalBytes = [int64]0 }
+    }
+    
+    $files = Get-ChildItem $Path -Recurse -File -ErrorAction SilentlyContinue
+    $fileCount = @($files).Count
+    $totalBytes = ($files | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+    $resultBytes = if ($totalBytes) { $totalBytes } else { 0 }
+    
+    return [PSCustomObject]@{
+        FileCount = $fileCount
+        TotalBytes = [int64]$resultBytes
+    }
+}
+
+function Get-RebalanceBackupFolders {
+    param($Peer)
+    
+    $config = Get-RingConfig
+    $folders = @()
+    $openedPath = Open-RebalancePeerRoot -Peer $Peer -CustomerCode $config.CustomerCode
+    if (-not $openedPath) {
+        return @()
+    }
+    
+    try {
+        $customerDirs = Get-ChildItem $openedPath -Directory -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -ne '_nodeinfo' }
+        
+        foreach ($customerDir in $customerDirs) {
+            foreach ($locationDir in @(Get-ChildItem $customerDir.FullName -Directory -ErrorAction SilentlyContinue)) {
+                foreach ($applicationDir in @(Get-ChildItem $locationDir.FullName -Directory -ErrorAction SilentlyContinue)) {
+                    foreach ($typeDir in @(Get-ChildItem $applicationDir.FullName -Directory -ErrorAction SilentlyContinue)) {
+                        foreach ($backupDir in @(Get-ChildItem $typeDir.FullName -Directory -ErrorAction SilentlyContinue)) {
+                            $sizeBytes = Get-RebalancePathSizeBytes -Path $backupDir.FullName
+                            $relativePath = $backupDir.FullName.Substring($openedPath.Length).TrimStart('\')
+                            $folders += [PSCustomObject]@{
+                                RelativePath = $relativePath
+                                FullPath = $backupDir.FullName
+                                SizeBytes = $sizeBytes
+                                SizeGB = [math]::Round($sizeBytes / 1GB, 2)
+                                Customer = $customerDir.Name
+                                Location = $locationDir.Name
+                                Application = $applicationDir.Name
+                                BackupType = $typeDir.Name
+                                BackupFolder = $backupDir.Name
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    finally {
+        Close-RebalancePeerRoot -Peer $Peer
+    }
+    
+    return $folders | Sort-Object SizeBytes -Descending
+}
+
+function Find-RebalanceTargetPeer {
+    param(
+        $SourcePeer,
+        $BackupFolder,
+        [array]$PeerCatalog
+    )
+    
+    $candidatePeers = $PeerCatalog |
+        Where-Object {
+            $_.Accessible -and
+            $_.TailscaleIP -ne $SourcePeer.TailscaleIP -and
+            $_.QuotaBytes -gt 0 -and
+            $_.RemainingBytes -ge $BackupFolder.SizeBytes
+        } |
+        Sort-Object RemainingBytes -Descending
+    
+    foreach ($peer in $candidatePeers) {
+        $config = Get-RingConfig
+        $openedPath = Open-RebalancePeerRoot -Peer $peer -CustomerCode $config.CustomerCode
+        if (-not $openedPath) { continue }
+        
+        try {
+            $destPath = Join-Path $openedPath $BackupFolder.RelativePath
+            if (-not (Test-Path $destPath)) {
+                return $peer
+            }
+        }
+        finally {
+            Close-RebalancePeerRoot -Peer $peer
+        }
+    }
+    
+    return $null
+}
+
+function Move-RebalanceBackupFolder {
+    param(
+        $SourcePeer,
+        $TargetPeer,
+        $BackupFolder
+    )
+    
+    $config = Get-RingConfig
+    $sourceRoot = Open-RebalancePeerRoot -Peer $SourcePeer -CustomerCode $config.CustomerCode
+    if (-not $sourceRoot) {
+        return [PSCustomObject]@{ Success = $false; Reason = "Source inaccessible" }
+    }
+    
+    $targetRoot = Open-RebalancePeerRoot -Peer $TargetPeer -CustomerCode $config.CustomerCode
+    if (-not $targetRoot) {
+        Close-RebalancePeerRoot -Peer $SourcePeer
+        return [PSCustomObject]@{ Success = $false; Reason = "Target inaccessible" }
+    }
+    
+    try {
+        $sourcePath = Join-Path $sourceRoot $BackupFolder.RelativePath
+        $targetPath = Join-Path $targetRoot $BackupFolder.RelativePath
+        $targetParent = Split-Path $targetPath -Parent
+        
+        if (Test-Path $targetPath) {
+            return [PSCustomObject]@{ Success = $false; Reason = "Target already contains backup" }
+        }
+        
+        if (-not (Test-Path $targetParent)) {
+            New-Item -Path $targetParent -ItemType Directory -Force | Out-Null
+        }
+        
+        $robocopyLog = Join-Path $script:LogPath "rebalance_$($SourcePeer.Hostname)_to_$($TargetPeer.Hostname)_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+        $robocopyArgs = @(
+            "`"$sourcePath`"",
+            "`"$targetPath`"",
+            "/E",
+            "/DCOPY:DAT", "/COPY:DAT",
+            "/R:2", "/W:5", "/MT:8",
+            "/LOG:`"$robocopyLog`""
+        )
+        
+        & robocopy @robocopyArgs | Out-Null
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -gt 7) {
+            return [PSCustomObject]@{ Success = $false; Reason = "Robocopy failed ($exitCode)" }
+        }
+        
+        $sourceStats = Get-RebalanceFolderStats -Path $sourcePath
+        $targetStats = Get-RebalanceFolderStats -Path $targetPath
+        if (($sourceStats.FileCount -ne $targetStats.FileCount) -or ($sourceStats.TotalBytes -ne $targetStats.TotalBytes)) {
+            return [PSCustomObject]@{ Success = $false; Reason = "Verification failed" }
+        }
+        
+        Remove-Item $sourcePath -Recurse -Force -ErrorAction Stop
+        
+        return [PSCustomObject]@{
+            Success = $true
+            MovedBytes = $sourceStats.TotalBytes
+            FileCount = $sourceStats.FileCount
+        }
+    }
+    catch {
+        return [PSCustomObject]@{ Success = $false; Reason = $_.Exception.Message }
+    }
+    finally {
+        Close-RebalancePeerRoot -Peer $TargetPeer
+        Close-RebalancePeerRoot -Peer $SourcePeer
+    }
+}
+
+function Invoke-StorageRebalance {
+    <#
+    .SYNOPSIS
+        Rebalances backup folders away from peers that exceed their quota
+    #>
+    Clear-Host
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "        REBALANCE STORAGE" -ForegroundColor Cyan
+    Write-Host "========================================`n" -ForegroundColor Cyan
+    
+    $config = Get-RingConfig
+    if (-not $config -or -not $config.CustomerCode) {
+        Write-Host "Ring is not configured on this node." -ForegroundColor Red
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+    
+    Write-Host "Analyzing peer usage and quotas..." -ForegroundColor Gray
+    $peerCatalog = @(Get-RebalancePeerCatalog)
+    $overQuotaPeers = $peerCatalog | Where-Object { $_.Accessible -and $_.ExcessBytes -gt 0 } | Sort-Object ExcessBytes -Descending
+    $inaccessiblePeers = $peerCatalog | Where-Object { -not $_.Accessible }
+    
+    if ($overQuotaPeers.Count -eq 0) {
+        Write-Host "`nNo accessible peers are over quota." -ForegroundColor Green
+        if ($inaccessiblePeers.Count -gt 0) {
+            Write-Host "`nPeers not analyzed:" -ForegroundColor Yellow
+            foreach ($peer in $inaccessiblePeers) {
+                Write-Host "  - $($peer.Hostname) [$($peer.TailscaleIP)]" -ForegroundColor DarkGray
+            }
+        }
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+    
+    Write-Host "`nPeers over quota:" -ForegroundColor Yellow
+    Write-Host "  # | Hostname              | Location             | Used GB | Quota GB | Excess GB" -ForegroundColor Gray
+    Write-Host " ---|-----------------------|----------------------|---------|----------|----------" -ForegroundColor Gray
+    for ($i = 0; $i -lt $overQuotaPeers.Count; $i++) {
+        $peer = $overQuotaPeers[$i]
+        $hostnameStr = if ($peer.Hostname) { $peer.Hostname } else { "Unknown" }
+        if ($hostnameStr.Length -gt 21) { $hostnameStr = $hostnameStr.Substring(0, 21) }
+        $locationStr = if ($peer.Location) { $peer.Location } else { "N/A" }
+        if ($locationStr.Length -gt 20) { $locationStr = $locationStr.Substring(0, 20) }
+        
+        Write-Host (" {0,2} | {1,-21} | {2,-20} | {3,7} | {4,8} | {5,8}" -f `
+            ($i + 1),
+            $hostnameStr,
+            $locationStr,
+            ([math]::Round($peer.UsedBytes / 1GB, 2)),
+            $peer.QuotaGB,
+            ([math]::Round($peer.ExcessBytes / 1GB, 2)))
+    }
+    
+    if ($inaccessiblePeers.Count -gt 0) {
+        Write-Host "`nPeers not analyzed:" -ForegroundColor Yellow
+        foreach ($peer in $inaccessiblePeers) {
+            Write-Host "  - $($peer.Hostname) [$($peer.TailscaleIP)]" -ForegroundColor DarkGray
+        }
+    }
+    
+    Write-Host ""
+    Write-Host "This will move verified backup folders to peers with available quota." -ForegroundColor White
+    Write-Host "No source folder is deleted until the copy is verified." -ForegroundColor White
+    Write-Host ""
+    Write-Host "Continue with rebalance? [Y/n]: " -NoNewline -ForegroundColor Yellow
+    $response = Read-Host
+    if ($response -ne '' -and $response -notmatch '^[Yy]') {
+        Write-Host "`nRebalance cancelled." -ForegroundColor Yellow
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+    
+    $summary = @()
+    foreach ($sourcePeer in $overQuotaPeers) {
+        Write-Host "`nProcessing $($sourcePeer.Hostname)..." -ForegroundColor Cyan
+        $folders = @(Get-RebalanceBackupFolders -Peer $sourcePeer)
+        if ($folders.Count -eq 0) {
+            Write-Host "  No backup folders found to move." -ForegroundColor Yellow
+            $summary += [PSCustomObject]@{
+                Source = $sourcePeer.Hostname
+                MovedGB = 0
+                RemainingExcessGB = [math]::Round($sourcePeer.ExcessBytes / 1GB, 2)
+                Status = "No movable folders"
+            }
+            continue
+        }
+        
+        $movedBytes = [int64]0
+        foreach ($folder in $folders) {
+            if ($sourcePeer.ExcessBytes -le 0) { break }
+            
+            $targetPeer = Find-RebalanceTargetPeer -SourcePeer $sourcePeer -BackupFolder $folder -PeerCatalog $peerCatalog
+            if (-not $targetPeer) { continue }
+            
+            Write-Host "  Moving $($folder.RelativePath) -> $($targetPeer.Hostname)" -ForegroundColor Gray
+            $result = Move-RebalanceBackupFolder -SourcePeer $sourcePeer -TargetPeer $targetPeer -BackupFolder $folder
+            if ($result.Success) {
+                $bytesMoved = if ($result.MovedBytes) { [int64]$result.MovedBytes } else { [int64]$folder.SizeBytes }
+                $sourcePeer.UsedBytes = [math]::Max([int64]0, [int64]($sourcePeer.UsedBytes - $bytesMoved))
+                $sourcePeer.ExcessBytes = [math]::Max([int64]0, [int64]($sourcePeer.UsedBytes - $sourcePeer.QuotaBytes))
+                $sourcePeer.RemainingBytes = [math]::Max([int64]0, [int64]($sourcePeer.QuotaBytes - $sourcePeer.UsedBytes))
+                $targetPeer.UsedBytes = [int64]($targetPeer.UsedBytes + $bytesMoved)
+                $targetPeer.ExcessBytes = [math]::Max([int64]0, [int64]($targetPeer.UsedBytes - $targetPeer.QuotaBytes))
+                $targetPeer.RemainingBytes = [math]::Max([int64]0, [int64]($targetPeer.QuotaBytes - $targetPeer.UsedBytes))
+                $movedBytes += $bytesMoved
+                Write-Log "Rebalanced $($folder.RelativePath) from $($sourcePeer.Hostname) to $($targetPeer.Hostname)" -Level SUCCESS
+                Write-Host "    OK ($([math]::Round($bytesMoved / 1GB, 2)) GB)" -ForegroundColor Green
+            }
+            else {
+                Write-Log "Failed to rebalance $($folder.RelativePath) from $($sourcePeer.Hostname): $($result.Reason)" -Level WARNING
+                Write-Host "    Skipped: $($result.Reason)" -ForegroundColor Yellow
+            }
+        }
+        
+        $summary += [PSCustomObject]@{
+            Source = $sourcePeer.Hostname
+            MovedGB = [math]::Round($movedBytes / 1GB, 2)
+            RemainingExcessGB = [math]::Round($sourcePeer.ExcessBytes / 1GB, 2)
+            Status = if ($sourcePeer.ExcessBytes -le 0) { "Balanced" } else { "Still over quota" }
+        }
+    }
+    
+    Write-Host "`nRebalance summary:" -ForegroundColor Cyan
+    foreach ($item in $summary) {
+        $color = if ($item.Status -eq "Balanced") { "Green" } else { "Yellow" }
+        Write-Host ("  {0,-21} moved {1,7} GB | remaining excess {2,7} GB | {3}" -f `
+            $item.Source, $item.MovedGB, $item.RemainingExcessGB, $item.Status) -ForegroundColor $color
+    }
+    
+    Read-Host "`nPress Enter to continue"
+}
+
+#endregion
+
 function Get-DestinationPath {
     <#
     .SYNOPSIS

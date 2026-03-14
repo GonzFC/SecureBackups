@@ -506,6 +506,7 @@ function Show-MainMenu {
     Write-Host "   P. Add Storage Peer (configure this machine)" -ForegroundColor White
     Write-Host "   S. Show Available Storage Peers" -ForegroundColor White
     Write-Host "   D. Discover & Update Peer List" -ForegroundColor White
+    Write-Host "   R. Rebalance Storage" -ForegroundColor White
 
     Write-Host ""
     Write-Host " STATUS" -ForegroundColor Yellow
@@ -543,6 +544,7 @@ function Start-MainLoop {
             "P" { Add-StoragePeer }
             "S" { Show-StoragePeers }
             "D" { Update-PeerList; Read-Host "`nPress Enter to continue" }
+            "R" { Invoke-StorageRebalance }
             
             # Status
             "9" { Show-BackupStatus }

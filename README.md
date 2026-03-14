@@ -63,6 +63,18 @@ This creates:
 
 After setting up multiple machines, run D to discover all peers with the same tag.
 
+### 2b. Rebalance Storage (R)
+
+Use `Rebalance Storage` from the main menu when one or more peers exceed their configured quota.
+
+The rebalance workflow:
+
+- scans all reachable peers and identifies those over quota
+- shows the peers that will be processed and asks for confirmation
+- copies complete backup folders to other peers with enough remaining quota
+- verifies the copied folder before deleting the source copy
+- stops moving data when the source peer is back under quota or no valid target remains
+
 ### 3. Create Backup Job
 
 Creates a backup job with automatic peer selection:
