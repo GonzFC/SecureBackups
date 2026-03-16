@@ -1560,6 +1560,19 @@ function Get-RebalancePeerCatalog {
                 $entry.Accessible = $true
                 $entry.UsedBytes = Get-RebalancePathSizeBytes -Path $openedPath
                 $entry.UsedGB = [math]::Round($entry.UsedBytes / 1GB, 2)
+                $statusFile = Join-Path $openedPath "_nodeinfo\jobs-status.json"
+                if (Test-Path $statusFile) {
+                    try {
+                        $nodeStatus = Get-Content $statusFile -Raw | ConvertFrom-Json
+                        if ($null -ne $nodeStatus.CDriveFreeGB) {
+                            $entry | Add-Member -NotePropertyName 'CDriveFreeGB' -NotePropertyValue $nodeStatus.CDriveFreeGB -Force
+                        }
+                        if ($null -ne $nodeStatus.StorageDriveFreeGB) {
+                            $entry | Add-Member -NotePropertyName 'StorageDriveFreeGB' -NotePropertyValue $nodeStatus.StorageDriveFreeGB -Force
+                        }
+                    }
+                    catch { }
+                }
                 if ($entry.QuotaBytes -gt 0) {
                     $entry.RemainingBytes = [math]::Max([int64]0, [int64]($entry.QuotaBytes - $entry.UsedBytes))
                     $entry.ExcessBytes = [math]::Max([int64]0, [int64]($entry.UsedBytes - $entry.QuotaBytes))
@@ -1780,19 +1793,21 @@ function Invoke-StorageRebalance {
     }
     
     Write-Host "`nPeers over quota:" -ForegroundColor Yellow
-    Write-Host "  # | Hostname              | Location             | Used GB | Quota GB | Excess GB" -ForegroundColor Gray
-    Write-Host " ---|-----------------------|----------------------|---------|----------|----------" -ForegroundColor Gray
+    Write-Host "  # | Hostname              | Location             | C Free | Used GB | Quota GB | Excess GB" -ForegroundColor Gray
+    Write-Host " ---|-----------------------|----------------------|--------|---------|----------|----------" -ForegroundColor Gray
     for ($i = 0; $i -lt $overQuotaPeers.Count; $i++) {
         $peer = $overQuotaPeers[$i]
         $hostnameStr = if ($peer.Hostname) { $peer.Hostname } else { "Unknown" }
         if ($hostnameStr.Length -gt 21) { $hostnameStr = $hostnameStr.Substring(0, 21) }
         $locationStr = if ($peer.Location) { $peer.Location } else { "N/A" }
         if ($locationStr.Length -gt 20) { $locationStr = $locationStr.Substring(0, 20) }
+        $cFreeStr = if ($null -ne $peer.CDriveFreeGB) { [string]([math]::Round([double]$peer.CDriveFreeGB, 1)) } else { "N/A" }
         
-        Write-Host (" {0,2} | {1,-21} | {2,-20} | {3,7} | {4,8} | {5,8}" -f `
+        Write-Host (" {0,2} | {1,-21} | {2,-20} | {3,6} | {4,7} | {5,8} | {6,8}" -f `
             ($i + 1),
             $hostnameStr,
             $locationStr,
+            $cFreeStr,
             ([math]::Round($peer.UsedBytes / 1GB, 2)),
             $peer.QuotaGB,
             ([math]::Round($peer.ExcessBytes / 1GB, 2)))
@@ -2506,11 +2521,33 @@ function Publish-NodeStatus {
         catch { $tsHostname = $env:COMPUTERNAME }
         
         # Build status object
+        $cDriveFreeGB = $null
+        $storageDriveFreeGB = $null
+        
+        try {
+            $cDrive = Get-PSDrive -Name 'C' -ErrorAction SilentlyContinue
+            if ($cDrive) {
+                $cDriveFreeGB = [math]::Round($cDrive.Free / 1GB, 2)
+            }
+        }
+        catch { }
+        
+        try {
+            $storageDriveLetter = (Split-Path $storagePath -Qualifier).TrimEnd(':')
+            $storageDrive = Get-PSDrive -Name $storageDriveLetter -ErrorAction SilentlyContinue
+            if ($storageDrive) {
+                $storageDriveFreeGB = [math]::Round($storageDrive.Free / 1GB, 2)
+            }
+        }
+        catch { }
+        
         $nodeStatus = @{
             NodeHostname = $tsHostname
             CustomerCode = $config.CustomerCode
             Location = $config.Location
             LastUpdated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            CDriveFreeGB = $cDriveFreeGB
+            StorageDriveFreeGB = $storageDriveFreeGB
             Jobs = @()
         }
         
