@@ -591,12 +591,6 @@ elseif ($ForceUpdate) {
     Invoke-SelfUpdate -Force
 }
 
-# Run startup discovery (peer scan)
-Write-Host ""
-if (Get-Command 'Invoke-StartupDiscovery' -ErrorAction SilentlyContinue) {
-    Invoke-StartupDiscovery
-}
-
 # Validate jobs and scheduled tasks
 if (Get-Command 'Invoke-JobsValidation' -ErrorAction SilentlyContinue) {
     Write-Host "Validating jobs and tasks..." -ForegroundColor Gray -NoNewline
