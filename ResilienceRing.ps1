@@ -121,7 +121,8 @@ function Invoke-SelfUpdate {
         Updates Resilience Ring to the latest version
     #>
     param(
-        [switch]$Force
+        [switch]$Force,
+        [switch]$Auto
     )
 
     Write-Host ""
@@ -135,7 +136,9 @@ function Invoke-SelfUpdate {
     if (-not $updateCheck.Available -and -not $Force) {
         Write-Host "You are running the latest version ($script:AppVersion)" -ForegroundColor Green
         Write-Host ""
-        Read-Host "Press Enter to continue"
+        if (-not $Auto) {
+            Read-Host "Press Enter to continue"
+        }
         return $false
     }
 
@@ -148,14 +151,20 @@ function Invoke-SelfUpdate {
         Write-Host "Force update requested" -ForegroundColor Cyan
     }
 
-    Write-Host ""
-    Write-Host "Would you like to update now? [Y/n]: " -NoNewline -ForegroundColor Yellow
-    $response = Read-Host
+    if (-not $Auto) {
+        Write-Host ""
+        Write-Host "Would you like to update now? [Y/n]: " -NoNewline -ForegroundColor Yellow
+        $response = Read-Host
 
-    if ($response -ne '' -and $response -notmatch '^[Yy]') {
-        Write-Host "Update cancelled." -ForegroundColor Yellow
-        Read-Host "Press Enter to continue"
-        return $false
+        if ($response -ne '' -and $response -notmatch '^[Yy]') {
+            Write-Host "Update cancelled." -ForegroundColor Yellow
+            Read-Host "Press Enter to continue"
+            return $false
+        }
+    }
+    else {
+        Write-Host ""
+        Write-Host "Update available - applying automatically..." -ForegroundColor Yellow
     }
 
     Write-Host ""
@@ -199,7 +208,9 @@ function Invoke-SelfUpdate {
             Write-Host ""
             Write-Host "Please restart Resilience Ring to use the new version." -ForegroundColor Yellow
             Write-Host ""
-            Read-Host "Press Enter to exit"
+            if (-not $Auto) {
+                Read-Host "Press Enter to exit"
+            }
             exit 0
         }
         catch {
@@ -279,13 +290,17 @@ function Invoke-SelfUpdate {
             Write-Host ""
             Write-Host "Please restart Resilience Ring to use the new version." -ForegroundColor Yellow
             Write-Host ""
-            Read-Host "Press Enter to exit"
+            if (-not $Auto) {
+                Read-Host "Press Enter to exit"
+            }
             exit 0
         }
         catch {
             Write-Host "Update failed: $_" -ForegroundColor Red
             Write-Host ""
-            Read-Host "Press Enter to continue"
+            if (-not $Auto) {
+                Read-Host "Press Enter to continue"
+            }
             return $false
         }
     }
@@ -579,22 +594,17 @@ if (-not (Initialize-Environment)) {
 }
 Write-Host "[OK] Environment ready" -ForegroundColor Green
 
-# Check for updates (unless skipped)
-if (-not $SkipUpdateCheck) {
+# Check for updates
+if ($ForceUpdate) {
+    Invoke-SelfUpdate -Force -Auto
+}
+elseif (-not $SkipUpdateCheck) {
     $updateInfo = Test-UpdateAvailable
     if ($updateInfo.Available) {
         Write-Host ""
-        Write-Host "A new version is available! Use 'U' from the menu to update." -ForegroundColor Yellow
+        Write-Host "A new version is available. Applying update now..." -ForegroundColor Yellow
+        Invoke-SelfUpdate -Auto
     }
-}
-elseif ($ForceUpdate) {
-    Invoke-SelfUpdate -Force
-}
-
-# Run startup discovery (peer scan)
-Write-Host ""
-if (Get-Command 'Invoke-StartupDiscovery' -ErrorAction SilentlyContinue) {
-    Invoke-StartupDiscovery
 }
 
 # Validate jobs and scheduled tasks
