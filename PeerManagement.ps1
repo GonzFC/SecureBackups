@@ -2559,9 +2559,18 @@ function Get-NodeStorageInventory {
     }
     
     $inventory.TotalBackupSets = @($backupSets).Count
-    $inventory.TotalFiles = (@($backupSets) | Measure-Object -Property FileCount -Sum).Sum
-    $inventory.TotalBytes = [int64]((@($backupSets) | Measure-Object -Property SizeBytes -Sum).Sum)
-    $inventory.BackupSets = @($backupSets | Sort-Object @{ Expression = 'LastWriteTime'; Descending = $true }, @{ Expression = 'SizeBytes'; Descending = $true })
+    if ($inventory.TotalBackupSets -gt 0) {
+        $totalFiles = ((@($backupSets) | Measure-Object -Property FileCount -Sum).Sum)
+        $totalBytes = ((@($backupSets) | Measure-Object -Property SizeBytes -Sum).Sum)
+        $inventory.TotalFiles = if ($null -ne $totalFiles) { [int]$totalFiles } else { 0 }
+        $inventory.TotalBytes = if ($null -ne $totalBytes) { [int64]$totalBytes } else { [int64]0 }
+        $inventory.BackupSets = @($backupSets | Sort-Object @{ Expression = 'LastWriteTime'; Descending = $true }, @{ Expression = 'SizeBytes'; Descending = $true })
+    }
+    else {
+        $inventory.TotalFiles = 0
+        $inventory.TotalBytes = [int64]0
+        $inventory.BackupSets = @()
+    }
     
     return [PSCustomObject]$inventory
 }
