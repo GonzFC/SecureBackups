@@ -1813,9 +1813,25 @@ function Show-BackupStatus {
 
     # Use Get-JobsWithStatus to merge master data with transaction data for display
     $jobs = @(Get-JobsWithStatus)
+    $ringConfig = if (Get-Command 'Get-RingConfig' -ErrorAction SilentlyContinue) { Get-RingConfig } else { $null }
+    $inventoryGroups = @()
+    $inventorySummary = $null
+    if ($ringConfig -and $ringConfig.StoragePath -and (Get-Command 'Get-NodeStorageInventory' -ErrorAction SilentlyContinue)) {
+        $inventorySummary = Get-NodeStorageInventory -StoragePath $ringConfig.StoragePath
+        if (Get-Command 'Get-NodeStorageInventoryGroups' -ErrorAction SilentlyContinue) {
+            $inventoryGroups = @(Get-NodeStorageInventoryGroups -StoragePath $ringConfig.StoragePath)
+        }
+    }
 
     if ($jobs.Count -eq 0) {
         Write-Host "No backup jobs configured." -ForegroundColor Yellow
+        if ($inventorySummary -and $inventorySummary.TotalBackupSets -gt 0) {
+            Write-Host ""
+            Write-Host "Stored backups on this peer:" -ForegroundColor Cyan
+            Write-Host "  Backup sets: $($inventorySummary.TotalBackupSets)" -ForegroundColor White
+            Write-Host "  Files:       $($inventorySummary.TotalFiles)" -ForegroundColor White
+            Write-Host "  Storage:     $(Format-RRSize -Bytes $inventorySummary.TotalBytes)" -ForegroundColor White
+        }
         Read-Host "`nPress Enter to continue"
         return
     }
@@ -1857,7 +1873,60 @@ function Show-BackupStatus {
         }
 
         Write-Host "Source: $($job.BackupObject)" -ForegroundColor Gray
-        Write-Host "Destination: $($job.DestinationPath)" -ForegroundColor Gray
+        if ($job.SourceLocation) {
+            Write-Host "Source Location: $($job.SourceLocation)" -ForegroundColor Gray
+        }
+        
+        if ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) {
+            Write-Host "Configured Peers:" -ForegroundColor Cyan
+            foreach ($peer in @($job.PeerDestinations)) {
+                $peerLabel = if ($peer.Hostname) { $peer.Hostname } else { $peer.TailscaleIP }
+                $peerBits = @($peerLabel)
+                if ($peer.Location) { $peerBits += $peer.Location }
+                if ($peer.TailscaleIP) { $peerBits += $peer.TailscaleIP }
+                Write-Host "  - $($peerBits -join ' | ')" -ForegroundColor White
+            }
+        }
+        elseif ($job.DestinationPath) {
+            Write-Host "Destination: $($job.DestinationPath)" -ForegroundColor Gray
+        }
+    }
+    
+    Write-Host "`n`nStored Backups On This Peer:" -ForegroundColor Cyan
+    Write-Host ("=" * 80) -ForegroundColor Gray
+    
+    if (-not $ringConfig -or -not $ringConfig.StoragePath) {
+        Write-Host "This machine is not configured as a storage peer." -ForegroundColor Yellow
+    }
+    elseif (-not (Test-Path $ringConfig.StoragePath)) {
+        Write-Host "Storage path not found: $($ringConfig.StoragePath)" -ForegroundColor Yellow
+    }
+    elseif (-not $inventorySummary -or $inventorySummary.TotalBackupSets -eq 0) {
+        Write-Host "No backup sets currently stored on this peer." -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "Storage Path: $($ringConfig.StoragePath)" -ForegroundColor Gray
+        Write-Host "Backup Sets:  $($inventorySummary.TotalBackupSets)" -ForegroundColor White
+        Write-Host "Files:        $($inventorySummary.TotalFiles)" -ForegroundColor White
+        Write-Host "Storage Used: $(Format-RRSize -Bytes $inventorySummary.TotalBytes)" -ForegroundColor White
+        Write-Host ""
+        
+        foreach ($group in @($inventoryGroups)) {
+            Write-Host "$($group.Application) [$($group.BackupType)]" -ForegroundColor White
+            Write-Host "  Source:       $($group.SourceLocation)" -ForegroundColor Gray
+            Write-Host "  Backup Sets:  $($group.BackupSetCount)" -ForegroundColor Gray
+            Write-Host "  Stored Size:  $($group.TotalSizeDisplay)" -ForegroundColor Gray
+            if ($group.TotalFiles -ne $null) {
+                Write-Host "  Files:        $($group.TotalFiles)" -ForegroundColor Gray
+            }
+            if ($group.LatestWriteTime) {
+                Write-Host "  Latest:       $($group.LatestBackupFolder) @ $($group.LatestWriteTime)" -ForegroundColor Gray
+            }
+            elseif ($group.LatestBackupFolder) {
+                Write-Host "  Latest:       $($group.LatestBackupFolder)" -ForegroundColor Gray
+            }
+            Write-Host ""
+        }
     }
 
     Write-Host "`n`nRecent Log Entries:" -ForegroundColor Cyan

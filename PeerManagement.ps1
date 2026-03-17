@@ -2444,6 +2444,157 @@ function Invoke-JobsValidation {
 
 #region Node Status Publishing
 
+function Format-RRSize {
+    param([Nullable[long]]$Bytes)
+    
+    if ($null -eq $Bytes) { return "0 B" }
+    
+    $value = [double]$Bytes
+    if ($value -ge 1TB) { return ("{0:N2} TB" -f ($value / 1TB)) }
+    if ($value -ge 1GB) { return ("{0:N2} GB" -f ($value / 1GB)) }
+    if ($value -ge 1MB) { return ("{0:N2} MB" -f ($value / 1MB)) }
+    if ($value -ge 1KB) { return ("{0:N2} KB" -f ($value / 1KB)) }
+    return ("{0} B" -f [int64]$Bytes)
+}
+
+function Get-NodeBackupRouting {
+    <#
+    .SYNOPSIS
+        Builds a routing summary of local jobs and their configured peer destinations
+    #>
+    param([array]$Jobs)
+    
+    $routes = @()
+    foreach ($job in @($Jobs)) {
+        $destinations = @()
+        
+        foreach ($peer in @($job.PeerDestinations)) {
+            if (-not $peer) { continue }
+            $destinations += @{
+                Hostname = $peer.Hostname
+                TailscaleIP = $peer.TailscaleIP
+                Location = $peer.Location
+                BasePath = $peer.BasePath
+            }
+        }
+        
+        if ($destinations.Count -eq 0 -and $job.DestinationPath) {
+            $destinations += @{
+                Hostname = $job.Destination
+                TailscaleIP = $null
+                Location = $null
+                BasePath = $job.DestinationPath
+            }
+        }
+        
+        $routes += @{
+            JobName = $job.JobName
+            AppName = if ($job.AppName) { $job.AppName } else { $job.JobName }
+            SourceLocation = $job.SourceLocation
+            BackupType = $job.BackupType
+            Enabled = ($job.Enabled -ne $false)
+            DestinationCount = $destinations.Count
+            Destinations = $destinations
+        }
+    }
+    
+    return @($routes)
+}
+
+function Get-NodeStorageInventory {
+    <#
+    .SYNOPSIS
+        Scans the local storage root and returns a backup inventory summary
+    #>
+    param([string]$StoragePath)
+    
+    $inventory = @{
+        GeneratedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        TotalBackupSets = 0
+        TotalFiles = 0
+        TotalBytes = [int64]0
+        BackupSets = @()
+    }
+    
+    if (-not $StoragePath -or -not (Test-Path $StoragePath)) {
+        return [PSCustomObject]$inventory
+    }
+    
+    $backupSets = @()
+    $customerDirs = @(Get-ChildItem $StoragePath -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne '_nodeinfo' })
+    foreach ($customerDir in $customerDirs) {
+        foreach ($locationDir in @(Get-ChildItem $customerDir.FullName -Directory -ErrorAction SilentlyContinue)) {
+            foreach ($applicationDir in @(Get-ChildItem $locationDir.FullName -Directory -ErrorAction SilentlyContinue)) {
+                foreach ($typeDir in @(Get-ChildItem $applicationDir.FullName -Directory -ErrorAction SilentlyContinue)) {
+                    foreach ($backupDir in @(Get-ChildItem $typeDir.FullName -Directory -ErrorAction SilentlyContinue)) {
+                        $stats = Get-RebalanceFolderStats -Path $backupDir.FullName
+                        $lastWrite = $null
+                        try {
+                            $lastWriteCandidate = Get-ChildItem $backupDir.FullName -Recurse -File -ErrorAction SilentlyContinue |
+                                Sort-Object LastWriteTime -Descending |
+                                Select-Object -First 1 -ExpandProperty LastWriteTime
+                            if ($lastWriteCandidate) {
+                                $lastWrite = (Get-Date $lastWriteCandidate).ToString("yyyy-MM-dd HH:mm:ss")
+                            }
+                        }
+                        catch { }
+                        
+                        $relativePath = $backupDir.FullName.Substring($StoragePath.Length).TrimStart('\')
+                        $backupSets += @{
+                            RelativePath = $relativePath
+                            CustomerCode = $customerDir.Name
+                            SourceLocation = $locationDir.Name
+                            Application = $applicationDir.Name
+                            BackupType = $typeDir.Name
+                            BackupFolder = $backupDir.Name
+                            FileCount = $stats.FileCount
+                            SizeBytes = [int64]$stats.TotalBytes
+                            SizeDisplay = (Format-RRSize -Bytes $stats.TotalBytes)
+                            LastWriteTime = $lastWrite
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    $inventory.TotalBackupSets = @($backupSets).Count
+    $inventory.TotalFiles = (@($backupSets) | Measure-Object -Property FileCount -Sum).Sum
+    $inventory.TotalBytes = [int64]((@($backupSets) | Measure-Object -Property SizeBytes -Sum).Sum)
+    $inventory.BackupSets = @($backupSets | Sort-Object @{ Expression = 'LastWriteTime'; Descending = $true }, @{ Expression = 'SizeBytes'; Descending = $true })
+    
+    return [PSCustomObject]$inventory
+}
+
+function Get-NodeStorageInventoryGroups {
+    <#
+    .SYNOPSIS
+        Returns grouped inventory rows for TUI display
+    #>
+    param([string]$StoragePath)
+    
+    $inventory = Get-NodeStorageInventory -StoragePath $StoragePath
+    $groups = @()
+    
+    foreach ($group in @($inventory.BackupSets | Group-Object SourceLocation, Application, BackupType)) {
+        $items = @($group.Group)
+        $latest = $items | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        $groups += [PSCustomObject]@{
+            SourceLocation = $items[0].SourceLocation
+            Application = $items[0].Application
+            BackupType = $items[0].BackupType
+            BackupSetCount = $items.Count
+            TotalFiles = (@($items) | Measure-Object -Property FileCount -Sum).Sum
+            TotalBytes = [int64]((@($items) | Measure-Object -Property SizeBytes -Sum).Sum)
+            TotalSizeDisplay = (Format-RRSize -Bytes ((@($items) | Measure-Object -Property SizeBytes -Sum).Sum))
+            LatestBackupFolder = $latest.BackupFolder
+            LatestWriteTime = $latest.LastWriteTime
+        }
+    }
+    
+    return @($groups | Sort-Object @{ Expression = 'LatestWriteTime'; Descending = $true }, @{ Expression = 'TotalBytes'; Descending = $true })
+}
+
 function Publish-NodeStatus {
     <#
     .SYNOPSIS
@@ -2541,6 +2692,9 @@ function Publish-NodeStatus {
         }
         catch { }
         
+        $routing = Get-NodeBackupRouting -Jobs $jobs
+        $inventory = Get-NodeStorageInventory -StoragePath $storagePath
+        
         $nodeStatus = @{
             NodeHostname = $tsHostname
             CustomerCode = $config.CustomerCode
@@ -2548,6 +2702,9 @@ function Publish-NodeStatus {
             LastUpdated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
             CDriveFreeGB = $cDriveFreeGB
             StorageDriveFreeGB = $storageDriveFreeGB
+            RoutingJobCount = @($routing).Count
+            InventoryBackupSetCount = $inventory.TotalBackupSets
+            InventoryTotalBytes = $inventory.TotalBytes
             Jobs = @()
         }
         
@@ -2573,6 +2730,27 @@ function Publish-NodeStatus {
         # Save to share
         $statusFile = Join-Path $nodeInfoPath "jobs-status.json"
         $nodeStatus | ConvertTo-Json -Depth 10 | Set-Content $statusFile -Force
+        
+        $routingFile = Join-Path $nodeInfoPath "backup-routing.json"
+        @{
+            NodeHostname = $tsHostname
+            CustomerCode = $config.CustomerCode
+            Location = $config.Location
+            LastUpdated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            Jobs = $routing
+        } | ConvertTo-Json -Depth 10 | Set-Content $routingFile -Force
+        
+        $inventoryFile = Join-Path $nodeInfoPath "storage-inventory.json"
+        @{
+            NodeHostname = $tsHostname
+            CustomerCode = $config.CustomerCode
+            Location = $config.Location
+            LastUpdated = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+            TotalBackupSets = $inventory.TotalBackupSets
+            TotalFiles = $inventory.TotalFiles
+            TotalBytes = $inventory.TotalBytes
+            BackupSets = $inventory.BackupSets
+        } | ConvertTo-Json -Depth 10 | Set-Content $inventoryFile -Force
         
         return $true
     }
