@@ -125,7 +125,8 @@ function Select-BackupPeers {
         3. Only use larger peers when smaller ones hit 70% capacity
     #>
     param(
-        [int]$MinPeers = 2
+        [int]$MinPeers = 2,
+        [switch]$UseCachedListOnly
     )
     
     $config = Get-RingConfig
@@ -134,9 +135,54 @@ function Select-BackupPeers {
         return @()
     }
     
-    Write-Host "Evaluating storage peers..." -ForegroundColor Gray
+    if ($UseCachedListOnly) {
+        Write-Host "Using discovered peer list..." -ForegroundColor Gray
+    }
+    else {
+        Write-Host "Evaluating storage peers..." -ForegroundColor Gray
+    }
     
-    # Get all available peers
+    # Fast path for job creation: use the peer list already discovered via D and
+    # distribute new jobs without rescanning the whole ring.
+    if ($UseCachedListOnly) {
+        $availablePeers = @((Get-StoragePeersList) | Where-Object { $_.TailscaleIP -and $_.TailscaleIP -ne $config.TailscaleIP })
+        if ($availablePeers.Count -lt $MinPeers) {
+            Write-Host "[WARN] Only $($availablePeers.Count) discovered peers available (need $MinPeers minimum)" -ForegroundColor Yellow
+            if ($availablePeers.Count -eq 0) {
+                return @()
+            }
+        }
+        
+        $assignmentCount = @{}
+        foreach ($job in @(Get-Jobs)) {
+            foreach ($peer in @($job.PeerDestinations)) {
+                if (-not $peer.TailscaleIP) { continue }
+                if (-not $assignmentCount.ContainsKey($peer.TailscaleIP)) {
+                    $assignmentCount[$peer.TailscaleIP] = 0
+                }
+                $assignmentCount[$peer.TailscaleIP]++
+            }
+        }
+        
+        $candidatePeers = @()
+        foreach ($peer in $availablePeers) {
+            $candidatePeers += [PSCustomObject]@{
+                Hostname = $peer.Hostname
+                TailscaleIP = $peer.TailscaleIP
+                Location = $peer.Location
+                QuotaGB = if ($peer.QuotaGB) { $peer.QuotaGB } else { 100 }
+                UsedGB = $null
+                UsedPct = $null
+                RemainingGB = $null
+                PingMs = $null
+                AssignmentCount = if ($assignmentCount.ContainsKey($peer.TailscaleIP)) { $assignmentCount[$peer.TailscaleIP] } else { 0 }
+            }
+        }
+        
+        return @($candidatePeers | Sort-Object AssignmentCount, @{ Expression = 'QuotaGB'; Descending = $true }, Hostname | Select-Object -First $MinPeers)
+    }
+    
+    # Full validation path for runtime or explicit health checks
     $availablePeers = Get-AvailableStoragePeers
     
     if ($availablePeers.Count -lt $MinPeers) {
@@ -460,7 +506,7 @@ function New-UnifiedBackupJob {
     # Automatic Peer Selection
     Write-Host "`n--- Selecting Storage Peers ---" -ForegroundColor Yellow
     
-    $selectedPeers = Select-BackupPeers -MinPeers 2
+    $selectedPeers = Select-BackupPeers -MinPeers 2 -UseCachedListOnly
     
     if ($selectedPeers.Count -eq 0) {
         Write-Host "`nNo storage peers available!" -ForegroundColor Red
@@ -472,7 +518,12 @@ function New-UnifiedBackupJob {
     Write-Host ""
     Write-Host "Selected $($selectedPeers.Count) peer(s) for backup:" -ForegroundColor Green
     foreach ($peer in $selectedPeers) {
-        Write-Host "  - $($peer.Hostname) @ $($peer.Location) ($($peer.UsedPct)% used)" -ForegroundColor White
+        if ($null -ne $peer.UsedPct) {
+            Write-Host "  - $($peer.Hostname) @ $($peer.Location) ($($peer.UsedPct)% used)" -ForegroundColor White
+        }
+        else {
+            Write-Host "  - $($peer.Hostname) @ $($peer.Location)" -ForegroundColor White
+        }
     }
 
     # Build destination paths
