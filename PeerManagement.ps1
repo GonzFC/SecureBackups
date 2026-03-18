@@ -2470,7 +2470,7 @@ function Get-NodeBackupRouting {
         
         foreach ($peer in @($job.PeerDestinations)) {
             if (-not $peer) { continue }
-            $destinations += @{
+            $destinations += [PSCustomObject]@{
                 Hostname = $peer.Hostname
                 TailscaleIP = $peer.TailscaleIP
                 Location = $peer.Location
@@ -2479,7 +2479,7 @@ function Get-NodeBackupRouting {
         }
         
         if ($destinations.Count -eq 0 -and $job.DestinationPath) {
-            $destinations += @{
+            $destinations += [PSCustomObject]@{
                 Hostname = $job.Destination
                 TailscaleIP = $null
                 Location = $null
@@ -2487,7 +2487,7 @@ function Get-NodeBackupRouting {
             }
         }
         
-        $routes += @{
+        $routes += [PSCustomObject]@{
             JobName = $job.JobName
             AppName = if ($job.AppName) { $job.AppName } else { $job.JobName }
             SourceLocation = $job.SourceLocation
@@ -2540,7 +2540,7 @@ function Get-NodeStorageInventory {
                         catch { }
                         
                         $relativePath = $backupDir.FullName.Substring($StoragePath.Length).TrimStart('\')
-                        $backupSets += @{
+                        $backupSets += [PSCustomObject]@{
                             RelativePath = $relativePath
                             CustomerCode = $customerDir.Name
                             SourceLocation = $locationDir.Name
