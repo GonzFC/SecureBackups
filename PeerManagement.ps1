@@ -2260,6 +2260,19 @@ function Invoke-JobsValidation {
             $result.JobsMigrated++
         }
         
+        # Never allow this node to remain in its own peer destination list.
+        if ($job.PeerDestinations -and $config -and $config.TailscaleIP) {
+            $existingPeers = @($job.PeerDestinations)
+            $filteredPeers = @($existingPeers | Where-Object { $_.TailscaleIP -and $_.TailscaleIP -ne $config.TailscaleIP })
+            if ($filteredPeers.Count -ne $existingPeers.Count) {
+                $jobs[$i] | Add-Member -NotePropertyName 'PeerDestinations' -NotePropertyValue $filteredPeers -Force
+                $job = $jobs[$i]
+                $modified = $true
+                $result.JobsRepaired++
+                Write-RRDebug "Removed local peer from destinations for job '$($job.JobName)'"
+            }
+        }
+        
         # AUTO-FIX: Jobs without valid destination configuration
         # This is NOT a user responsibility - app must fix silently
         $hasValidDestination = ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) -or 
@@ -2275,7 +2288,7 @@ function Invoke-JobsValidation {
                 $config = Get-RingConfig
                 if ($config -and $config.CustomerCode) {
                     # Get available storage peers
-                    $storagePeers = Get-StoragePeersList
+                    $storagePeers = @(Get-AvailableStoragePeers)
                     if ($storagePeers -and $storagePeers.Count -gt 0) {
                         # Select minimum 2 peers (or all if fewer available)
                         $peersToUse = $storagePeers | Select-Object -First ([Math]::Min(2, $storagePeers.Count))
@@ -2285,6 +2298,7 @@ function Invoke-JobsValidation {
                             $peerDestinations += @{
                                 Hostname = $peer.Hostname
                                 TailscaleIP = $peer.TailscaleIP
+                                Location = $peer.Location
                                 BasePath = "\\$($peer.TailscaleIP)\RR_Backups"
                             }
                         }
