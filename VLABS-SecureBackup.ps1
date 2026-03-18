@@ -1882,7 +1882,7 @@ function Show-BackupStatus {
             foreach ($peer in @($job.PeerDestinations)) {
                 $peerLabel = if ($peer.Hostname) { $peer.Hostname } else { $peer.TailscaleIP }
                 $peerBits = @($peerLabel)
-                if ($peer.Location) { $peerBits += $peer.Location }
+                if ($peer.Location) { $peerBits += "@ $($peer.Location)" }
                 if ($peer.TailscaleIP) { $peerBits += $peer.TailscaleIP }
                 Write-Host "  - $($peerBits -join ' | ')" -ForegroundColor White
             }

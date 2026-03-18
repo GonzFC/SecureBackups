@@ -686,6 +686,8 @@ function Test-PeerQuotaCapacity {
 function Resolve-ExecutionPeers {
     param($Job)
     
+    $config = Get-RingConfig
+    $localPeerIp = if ($config) { $config.TailscaleIP } else { $null }
     $requiredPeers = if ($Job.PeerDestinations -and $Job.PeerDestinations.Count -gt 0) {
         $Job.PeerDestinations.Count
     } else {
@@ -710,6 +712,11 @@ function Resolve-ExecutionPeers {
     $selectedIps = @{}
     
     foreach ($peer in @($Job.PeerDestinations)) {
+        if ($localPeerIp -and $peer.TailscaleIP -eq $localPeerIp) {
+            Write-Log "Skipping local peer entry for job $($Job.JobName); recent backups must target remote peers only." -Level WARNING
+            continue
+        }
+        
         $candidate = if ($availableByIp.ContainsKey($peer.TailscaleIP)) { $availableByIp[$peer.TailscaleIP] } else { $peer }
         $capacity = Test-PeerQuotaCapacity -Peer $candidate -Job $Job -EstimatedBackupBytes $estimatedBackupBytes
         if ($capacity.Allowed) {
