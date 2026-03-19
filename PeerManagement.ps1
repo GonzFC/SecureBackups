@@ -374,6 +374,26 @@ function Get-LocalTailscaleTag {
     return $null
 }
 
+function Get-EffectiveTailscaleMode {
+    <#
+    .SYNOPSIS
+        Returns the effective Tailscale mode for this node
+    .DESCRIPTION
+        Falls back to AlwaysOn when the value is missing or invalid.
+    #>
+    param($Config = $null)
+    
+    if (-not $Config) {
+        $Config = Get-RingConfig
+    }
+    
+    if ($Config -and $Config.TailscaleMode -and $Config.TailscaleMode -match '^(?i:PerJob)$') {
+        return 'PerJob'
+    }
+    
+    return 'AlwaysOn'
+}
+
 function Get-LocalLocation {
     <#
     .SYNOPSIS
@@ -1024,6 +1044,7 @@ function Add-StoragePeer {
         TailscaleIP = $tsStatus.Self.TailscaleIPs[0]
         CustomerCode = $codename
         TailscaleTag = $tailscaleTag
+        TailscaleMode = 'AlwaysOn'
         Location = $locationName
         StoragePath = $storagePath
         QuotaGB = $quotaGB
