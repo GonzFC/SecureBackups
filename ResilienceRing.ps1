@@ -521,6 +521,7 @@ function Show-MainMenu {
     Write-Host "   P. Add Storage Peer (configure this machine)" -ForegroundColor White
     Write-Host "   S. Show Available Storage Peers" -ForegroundColor White
     Write-Host "   D. Discover & Update Peer List" -ForegroundColor White
+    Write-Host "   T. Configure Tailscale Mode" -ForegroundColor White
     Write-Host "   R. Rebalance Storage" -ForegroundColor White
 
     Write-Host ""
@@ -559,6 +560,7 @@ function Start-MainLoop {
             "P" { Add-StoragePeer }
             "S" { Show-StoragePeers }
             "D" { Update-PeerList; Read-Host "`nPress Enter to continue" }
+            "T" { Set-TailscaleMode }
             "R" { Invoke-StorageRebalance }
             
             # Status
