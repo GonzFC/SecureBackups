@@ -394,6 +394,82 @@ function Get-EffectiveTailscaleMode {
     return 'AlwaysOn'
 }
 
+function Set-TailscaleMode {
+    <#
+    .SYNOPSIS
+        Interactively changes the TailscaleMode for this peer
+    .DESCRIPTION
+        AlwaysOn  - Tailscale stays connected at all times (default).
+        PerJob    - Tailscale is enabled only while a backup job runs.
+                    Use this when Tailscale causes VPN conflicts on the
+                    client machine. Note: peer cannot RECEIVE backups in
+                    this mode, but can still SEND them.
+    #>
+    Clear-Host
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "    CONFIGURE TAILSCALE MODE" -ForegroundColor Cyan
+    Write-Host "========================================`n" -ForegroundColor Cyan
+
+    $config = Get-RingConfig
+    if (-not $config) {
+        Write-Host "ERROR: This machine is not configured yet." -ForegroundColor Red
+        Write-Host "Run 'Add Storage Peer' (P) first." -ForegroundColor Yellow
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    $currentMode = Get-EffectiveTailscaleMode -Config $config
+
+    Write-Host "Current mode: " -NoNewline
+    Write-Host $currentMode -ForegroundColor $(if ($currentMode -eq 'PerJob') { 'Yellow' } else { 'Green' })
+    Write-Host ""
+    Write-Host "  1. AlwaysOn  - Tailscale runs continuously (default)" -ForegroundColor White
+    Write-Host "     Peer can send AND receive backups." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  2. PerJob    - Tailscale activates only during backup jobs" -ForegroundColor White
+    Write-Host "     Use when Tailscale conflicts with client applications." -ForegroundColor Gray
+    Write-Host "     WARNING: Peer will NOT receive backups in this mode." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  0. Cancel" -ForegroundColor White
+    Write-Host ""
+
+    $choice = Read-Host "Select mode"
+
+    $newMode = switch ($choice) {
+        "1" { 'AlwaysOn' }
+        "2" { 'PerJob' }
+        "0" { $null }
+        default { $null }
+    }
+
+    if (-not $newMode) {
+        Write-Host "Cancelled." -ForegroundColor Yellow
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    if ($newMode -eq $currentMode) {
+        Write-Host "`nMode is already set to '$currentMode'. No changes made." -ForegroundColor Yellow
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    $config | Add-Member -NotePropertyName 'TailscaleMode' -NotePropertyValue $newMode -Force
+    Save-RingConfig -Config $config
+
+    Write-Host ""
+    Write-Host "Tailscale mode set to: " -NoNewline
+    Write-Host $newMode -ForegroundColor $(if ($newMode -eq 'PerJob') { 'Yellow' } else { 'Green' })
+
+    if ($newMode -eq 'PerJob') {
+        Write-Host ""
+        Write-Host "REMINDER: This peer will no longer receive backups from other peers." -ForegroundColor Yellow
+        Write-Host "Other peers will be notified on their next discovery scan." -ForegroundColor Gray
+    }
+
+    Read-Host "`nPress Enter to continue"
+}
+
 function Get-LocalLocation {
     <#
     .SYNOPSIS
