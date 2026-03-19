@@ -505,6 +505,83 @@ function Test-BackupIntegrity {
 
 #endregion
 
+#region Tailscale Session
+
+function Ensure-TailscaleForBackup {
+    <#
+    .SYNOPSIS
+        Ensures Tailscale is connected for the duration of a backup job
+    .DESCRIPTION
+        If Tailscale is already connected, leaves it untouched.
+        If it is disconnected, brings it up and marks it for cleanup at the end.
+    #>
+    $result = [PSCustomObject]@{
+        Ready = $false
+        StartedByJob = $false
+        Mode = 'AlwaysOn'
+        Reason = $null
+    }
+    
+    $tailscaleExe = Get-TailscaleExePath
+    if (-not $tailscaleExe) {
+        $result.Reason = "Tailscale not installed"
+        return $result
+    }
+    
+    $config = Get-RingConfig
+    $result.Mode = Get-EffectiveTailscaleMode -Config $config
+    
+    $tsStatus = Test-TailscaleInstalled
+    if ($tsStatus.Connected) {
+        $result.Ready = $true
+        return $result
+    }
+    
+    Write-Log "Tailscale is disconnected. Bringing it up for this backup job..." -Level INFO
+    & $tailscaleExe up --accept-dns=false 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        $result.Reason = "tailscale up failed"
+        return $result
+    }
+    
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        Start-Sleep -Seconds 1
+        $tsStatus = Test-TailscaleInstalled
+        if ($tsStatus.Connected) {
+            $result.Ready = $true
+            $result.StartedByJob = $true
+            return $result
+        }
+    }
+    
+    $result.Reason = "Tailscale did not reach connected state"
+    return $result
+}
+
+function Restore-TailscaleAfterBackup {
+    <#
+    .SYNOPSIS
+        Restores Tailscale connectivity after a backup job
+    .DESCRIPTION
+        Only disconnects Tailscale when the current job explicitly started it.
+    #>
+    param($Session)
+    
+    if (-not $Session -or -not $Session.StartedByJob -or $Session.Mode -ne 'PerJob') {
+        return
+    }
+    
+    $tailscaleExe = Get-TailscaleExePath
+    if (-not $tailscaleExe) {
+        return
+    }
+    
+    Write-Log "Stopping Tailscale after backup job completion..." -Level INFO
+    & $tailscaleExe down 2>&1 | Out-Null
+}
+
+#endregion
+
 #region SMB Connection
 
 function Connect-ToPeer {
@@ -1061,66 +1138,77 @@ function Invoke-BackupJob {
     $startTime = Get-Date
     Write-Log "=== Backup Job Started: $JobName ===" -Level INFO
     
-    $jobs = Get-Jobs
-    $job = $jobs | Where-Object { $_.JobName -eq $JobName }
-    
-    if (-not $job) {
-        Write-Log "Job not found: $JobName" -Level ERROR
+    $tailscaleSession = Ensure-TailscaleForBackup
+    if (-not $tailscaleSession.Ready) {
+        Write-Log "Cannot start backup because Tailscale is unavailable: $($tailscaleSession.Reason)" -Level ERROR
         return $false
     }
     
-    if ($job.Enabled -eq $false) {
-        Write-Log "Job is disabled" -Level WARNING
-        return $false
-    }
-    
-    Update-JobStatus -JobName $JobName -Status "Running"
-    
-    # Determine job type and execute
-    $success = $false
-    $sizeBytes = 0
-    
-    if ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) {
-        # New unified backup with retention
-        $success = Invoke-UnifiedBackup -Job $job
+    try {
+        $jobs = Get-Jobs
+        $job = $jobs | Where-Object { $_.JobName -eq $JobName }
         
-        # Calculate source size
-        try {
-            if ($job.BackupType -eq 'F') {
-                $sizeBytes = (Get-Item $job.BackupObject -ErrorAction SilentlyContinue).Length
-            }
-            else {
-                $sizeBytes = (Get-ChildItem $job.BackupObject -Recurse -File -ErrorAction SilentlyContinue | 
-                              Measure-Object -Property Length -Sum).Sum
-            }
+        if (-not $job) {
+            Write-Log "Job not found: $JobName" -Level ERROR
+            return $false
         }
-        catch { $sizeBytes = 0 }
+        
+        if ($job.Enabled -eq $false) {
+            Write-Log "Job is disabled" -Level WARNING
+            return $false
+        }
+        
+        Update-JobStatus -JobName $JobName -Status "Running"
+        
+        # Determine job type and execute
+        $success = $false
+        $sizeBytes = 0
+        
+        if ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) {
+            # New unified backup with retention
+            $success = Invoke-UnifiedBackup -Job $job
+            
+            # Calculate source size
+            try {
+                if ($job.BackupType -eq 'F') {
+                    $sizeBytes = (Get-Item $job.BackupObject -ErrorAction SilentlyContinue).Length
+                }
+                else {
+                    $sizeBytes = (Get-ChildItem $job.BackupObject -Recurse -File -ErrorAction SilentlyContinue | 
+                                  Measure-Object -Property Length -Sum).Sum
+                }
+            }
+            catch { $sizeBytes = 0 }
+        }
+        elseif ($job.DestinationPath) {
+            # Legacy single-destination backup
+            $success = Invoke-LegacyBackup -Job $job
+        }
+        else {
+            Write-Log "Job has no valid destination configuration" -Level ERROR
+        }
+        
+        $endTime = Get-Date
+        $durationSeconds = [int]($endTime - $startTime).TotalSeconds
+        
+        $finalStatus = if ($success) { "Success" } else { "Failed" }
+        Update-JobStatus -JobName $JobName -Status $finalStatus -DurationSeconds $durationSeconds -SizeBytes $sizeBytes
+        
+        # After successful backup, enforce ring policies on job master data
+        if ($success) {
+            Invoke-RingPolicyEnforcement -JobName $JobName
+        }
+        
+        # Publish status to share for RRM
+        Publish-NodeStatus
+        
+        Write-Log "=== Backup Job Completed: $JobName - $finalStatus (${durationSeconds}s) ===" -Level $(if($success){'SUCCESS'}else{'ERROR'})
+        
+        return $success
     }
-    elseif ($job.DestinationPath) {
-        # Legacy single-destination backup
-        $success = Invoke-LegacyBackup -Job $job
+    finally {
+        Restore-TailscaleAfterBackup -Session $tailscaleSession
     }
-    else {
-        Write-Log "Job has no valid destination configuration" -Level ERROR
-    }
-    
-    $endTime = Get-Date
-    $durationSeconds = [int]($endTime - $startTime).TotalSeconds
-    
-    $finalStatus = if ($success) { "Success" } else { "Failed" }
-    Update-JobStatus -JobName $JobName -Status $finalStatus -DurationSeconds $durationSeconds -SizeBytes $sizeBytes
-    
-    # After successful backup, enforce ring policies on job master data
-    if ($success) {
-        Invoke-RingPolicyEnforcement -JobName $JobName
-    }
-    
-    # Publish status to share for RRM
-    Publish-NodeStatus
-    
-    Write-Log "=== Backup Job Completed: $JobName - $finalStatus (${durationSeconds}s) ===" -Level $(if($success){'SUCCESS'}else{'ERROR'})
-    
-    return $success
 }
 
 # Main entry point
