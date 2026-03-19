@@ -1607,6 +1607,46 @@ function Get-RebalanceFolderStats {
     }
 }
 
+function New-RebalanceCandidate {
+    param(
+        [string]$OpenedPath,
+        [string]$CandidatePath,
+        [string]$Customer,
+        [string]$Location,
+        [string]$Application,
+        [string]$BackupType,
+        [string]$BackupFolder,
+        [string]$ItemKind = 'Folder'
+    )
+    
+    $relativePath = $CandidatePath.Substring($OpenedPath.Length).TrimStart('\')
+    $stats = if ($ItemKind -eq 'DirectFiles') {
+        $files = Get-ChildItem $CandidatePath -File -ErrorAction SilentlyContinue
+        $totalBytes = ($files | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+        $resultBytes = if ($totalBytes) { $totalBytes } else { 0 }
+        [PSCustomObject]@{
+            FileCount = @($files).Count
+            TotalBytes = [int64]$resultBytes
+        }
+    } else {
+        Get-RebalanceFolderStats -Path $CandidatePath
+    }
+    
+    return [PSCustomObject]@{
+        RelativePath = $relativePath
+        FullPath = $CandidatePath
+        SizeBytes = $stats.TotalBytes
+        SizeGB = [math]::Round($stats.TotalBytes / 1GB, 2)
+        Customer = $Customer
+        Location = $Location
+        Application = $Application
+        BackupType = $BackupType
+        BackupFolder = $BackupFolder
+        ItemKind = $ItemKind
+        FileCount = $stats.FileCount
+    }
+}
+
 function Get-RebalanceBackupFolders {
     param($Peer)
     
@@ -1620,25 +1660,54 @@ function Get-RebalanceBackupFolders {
     try {
         $customerDirs = Get-ChildItem $openedPath -Directory -ErrorAction SilentlyContinue |
                         Where-Object { $_.Name -ne '_nodeinfo' }
+        $seenPaths = @{}
         
         foreach ($customerDir in $customerDirs) {
             foreach ($locationDir in @(Get-ChildItem $customerDir.FullName -Directory -ErrorAction SilentlyContinue)) {
                 foreach ($applicationDir in @(Get-ChildItem $locationDir.FullName -Directory -ErrorAction SilentlyContinue)) {
-                    foreach ($typeDir in @(Get-ChildItem $applicationDir.FullName -Directory -ErrorAction SilentlyContinue)) {
-                        foreach ($backupDir in @(Get-ChildItem $typeDir.FullName -Directory -ErrorAction SilentlyContinue)) {
-                            $sizeBytes = Get-RebalancePathSizeBytes -Path $backupDir.FullName
-                            $relativePath = $backupDir.FullName.Substring($openedPath.Length).TrimStart('\')
-                            $folders += [PSCustomObject]@{
-                                RelativePath = $relativePath
-                                FullPath = $backupDir.FullName
-                                SizeBytes = $sizeBytes
-                                SizeGB = [math]::Round($sizeBytes / 1GB, 2)
-                                Customer = $customerDir.Name
-                                Location = $locationDir.Name
-                                Application = $applicationDir.Name
-                                BackupType = $typeDir.Name
-                                BackupFolder = $backupDir.Name
+                    $childDirs = @(Get-ChildItem $applicationDir.FullName -Directory -ErrorAction SilentlyContinue)
+                    foreach ($childDir in $childDirs) {
+                        $isKnownTypeDir = $childDir.Name -in @('file', 'directory', 'database')
+                        
+                        if ($isKnownTypeDir) {
+                            $directFiles = @(Get-ChildItem $childDir.FullName -File -ErrorAction SilentlyContinue)
+                            if ($directFiles.Count -gt 0 -and -not $seenPaths.ContainsKey($childDir.FullName)) {
+                                $folders += New-RebalanceCandidate `
+                                    -OpenedPath $openedPath `
+                                    -CandidatePath $childDir.FullName `
+                                    -Customer $customerDir.Name `
+                                    -Location $locationDir.Name `
+                                    -Application $applicationDir.Name `
+                                    -BackupType $childDir.Name `
+                                    -BackupFolder '[direct-files]' `
+                                    -ItemKind 'DirectFiles'
+                                $seenPaths[$childDir.FullName] = $true
                             }
+                            
+                            foreach ($backupDir in @(Get-ChildItem $childDir.FullName -Directory -ErrorAction SilentlyContinue)) {
+                                if ($seenPaths.ContainsKey($backupDir.FullName)) { continue }
+                                $folders += New-RebalanceCandidate `
+                                    -OpenedPath $openedPath `
+                                    -CandidatePath $backupDir.FullName `
+                                    -Customer $customerDir.Name `
+                                    -Location $locationDir.Name `
+                                    -Application $applicationDir.Name `
+                                    -BackupType $childDir.Name `
+                                    -BackupFolder $backupDir.Name
+                                $seenPaths[$backupDir.FullName] = $true
+                            }
+                        }
+                        else {
+                            if ($seenPaths.ContainsKey($childDir.FullName)) { continue }
+                            $folders += New-RebalanceCandidate `
+                                -OpenedPath $openedPath `
+                                -CandidatePath $childDir.FullName `
+                                -Customer $customerDir.Name `
+                                -Location $locationDir.Name `
+                                -Application $applicationDir.Name `
+                                -BackupType 'legacy' `
+                                -BackupFolder $childDir.Name
+                            $seenPaths[$childDir.FullName] = $true
                         }
                     }
                 }
@@ -1675,7 +1744,25 @@ function Find-RebalanceTargetPeer {
         
         try {
             $destPath = Join-Path $openedPath $BackupFolder.RelativePath
-            if (-not (Test-Path $destPath)) {
+            if ($BackupFolder.ItemKind -eq 'DirectFiles') {
+                if (-not (Test-Path $destPath)) {
+                    return $peer
+                }
+                
+                $sourceFiles = @(Get-ChildItem $BackupFolder.FullPath -File -ErrorAction SilentlyContinue)
+                $hasConflict = $false
+                foreach ($file in $sourceFiles) {
+                    if (Test-Path (Join-Path $destPath $file.Name)) {
+                        $hasConflict = $true
+                        break
+                    }
+                }
+                
+                if (-not $hasConflict) {
+                    return $peer
+                }
+            }
+            elseif (-not (Test-Path $destPath)) {
                 return $peer
             }
         }
@@ -1711,42 +1798,84 @@ function Move-RebalanceBackupFolder {
         $targetPath = Join-Path $targetRoot $BackupFolder.RelativePath
         $targetParent = Split-Path $targetPath -Parent
         
-        if (Test-Path $targetPath) {
+        if ($BackupFolder.ItemKind -ne 'DirectFiles' -and (Test-Path $targetPath)) {
             return [PSCustomObject]@{ Success = $false; Reason = "Target already contains backup" }
         }
         
-        if (-not (Test-Path $targetParent)) {
+        if ($BackupFolder.ItemKind -eq 'DirectFiles') {
+            if (-not (Test-Path $targetPath)) {
+                New-Item -Path $targetPath -ItemType Directory -Force | Out-Null
+            }
+        }
+        elseif (-not (Test-Path $targetParent)) {
             New-Item -Path $targetParent -ItemType Directory -Force | Out-Null
         }
-        
-        $robocopyLog = Join-Path $script:LogPath "rebalance_$($SourcePeer.Hostname)_to_$($TargetPeer.Hostname)_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-        $robocopyArgs = @(
-            "`"$sourcePath`"",
-            "`"$targetPath`"",
-            "/E",
-            "/DCOPY:DAT", "/COPY:DAT",
-            "/R:2", "/W:5", "/MT:8",
-            "/LOG:`"$robocopyLog`""
-        )
-        
-        & robocopy @robocopyArgs | Out-Null
-        $exitCode = $LASTEXITCODE
-        if ($exitCode -gt 7) {
-            return [PSCustomObject]@{ Success = $false; Reason = "Robocopy failed ($exitCode)" }
+
+        if ($BackupFolder.ItemKind -eq 'DirectFiles') {
+            $sourceFiles = @(Get-ChildItem $sourcePath -File -ErrorAction SilentlyContinue)
+            if ($sourceFiles.Count -eq 0) {
+                return [PSCustomObject]@{ Success = $false; Reason = "No direct files found" }
+            }
+            
+            foreach ($file in $sourceFiles) {
+                Copy-Item -Path $file.FullName -Destination (Join-Path $targetPath $file.Name) -Force -ErrorAction Stop
+            }
+            
+            $sourceFileCount = $sourceFiles.Count
+            $sourceBytes = [int64](($sourceFiles | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum)
+            $verifiedBytes = [int64]0
+            foreach ($file in $sourceFiles) {
+                $targetFile = Join-Path $targetPath $file.Name
+                if (-not (Test-Path $targetFile)) {
+                    return [PSCustomObject]@{ Success = $false; Reason = "Verification failed" }
+                }
+                
+                $targetInfo = Get-Item $targetFile -ErrorAction Stop
+                if ($targetInfo.Length -ne $file.Length) {
+                    return [PSCustomObject]@{ Success = $false; Reason = "Verification failed" }
+                }
+                
+                $verifiedBytes += [int64]$targetInfo.Length
+            }
+            
+            if ($verifiedBytes -ne $sourceBytes) {
+                return [PSCustomObject]@{ Success = $false; Reason = "Verification failed" }
+            }
+            
+            foreach ($file in $sourceFiles) {
+                Remove-Item $file.FullName -Force -ErrorAction Stop
+            }
         }
-        
-        $sourceStats = Get-RebalanceFolderStats -Path $sourcePath
-        $targetStats = Get-RebalanceFolderStats -Path $targetPath
-        if (($sourceStats.FileCount -ne $targetStats.FileCount) -or ($sourceStats.TotalBytes -ne $targetStats.TotalBytes)) {
-            return [PSCustomObject]@{ Success = $false; Reason = "Verification failed" }
+        else {
+            $robocopyLog = Join-Path $script:LogPath "rebalance_$($SourcePeer.Hostname)_to_$($TargetPeer.Hostname)_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            $robocopyArgs = @(
+                "`"$sourcePath`"",
+                "`"$targetPath`"",
+                "/E",
+                "/DCOPY:DAT", "/COPY:DAT",
+                "/R:2", "/W:5", "/MT:8",
+                "/LOG:`"$robocopyLog`""
+            )
+            
+            & robocopy @robocopyArgs | Out-Null
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -gt 7) {
+                return [PSCustomObject]@{ Success = $false; Reason = "Robocopy failed ($exitCode)" }
+            }
+            
+            $sourceStats = Get-RebalanceFolderStats -Path $sourcePath
+            $targetStats = Get-RebalanceFolderStats -Path $targetPath
+            if (($sourceStats.FileCount -ne $targetStats.FileCount) -or ($sourceStats.TotalBytes -ne $targetStats.TotalBytes)) {
+                return [PSCustomObject]@{ Success = $false; Reason = "Verification failed" }
+            }
+            
+            Remove-Item $sourcePath -Recurse -Force -ErrorAction Stop
         }
-        
-        Remove-Item $sourcePath -Recurse -Force -ErrorAction Stop
         
         return [PSCustomObject]@{
             Success = $true
-            MovedBytes = $sourceStats.TotalBytes
-            FileCount = $sourceStats.FileCount
+            MovedBytes = if ($BackupFolder.ItemKind -eq 'DirectFiles') { $sourceBytes } else { $sourceStats.TotalBytes }
+            FileCount = if ($BackupFolder.ItemKind -eq 'DirectFiles') { $sourceFileCount } else { $sourceStats.FileCount }
         }
     }
     catch {
