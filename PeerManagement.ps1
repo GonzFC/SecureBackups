@@ -848,6 +848,107 @@ function Get-PeerInfo {
 
 #endregion
 
+#region RRM API Integration
+
+function Register-PeerWithRrmApi {
+    <#
+    .SYNOPSIS
+        Registers this peer with the Resilience Ring Monitor API.
+        Sends peer info, jobs and destinations. Saves the returned apiKey to ring-config.json.
+        Safe to call multiple times — the API endpoint is idempotent.
+    .NOTES
+        Requires ring-config.json to have RrmApiUrl and ProjectId set.
+        If either is missing the function exits silently (not an error).
+    #>
+    param(
+        [Parameter(Mandatory=$false)]
+        [PSCustomObject]$Config  # pass already-loaded config to avoid re-reading
+    )
+
+    $config = if ($Config) { $Config } else { Get-RingConfig }
+    if (-not $config) { return }
+
+    # Skip if API URL or ProjectId not configured
+    if (-not $config.RrmApiUrl -or -not $config.ProjectId) {
+        Write-RRDebug "RRM API registration skipped: RrmApiUrl or ProjectId not set in ring-config.json"
+        return
+    }
+
+    $apiUrl   = $config.RrmApiUrl.TrimEnd('/')
+    $endpoint = "$apiUrl/api/peers/register"
+
+    # Map BackupType codes to API strings
+    $typeMap = @{ 'F' = 'file'; 'D' = 'directory'; 'SQL' = 'database' }
+
+    # Load jobs from local jobs.json
+    $jobsFile = "C:\ProgramData\VLABS_ResilienceRing\jobs.json"
+    $localJobs = @()
+    if (Test-Path $jobsFile) {
+        try { $localJobs = @(Get-Content $jobsFile -Raw | ConvertFrom-Json) } catch {}
+    }
+
+    # Build jobs payload
+    $jobsPayload = @()
+    foreach ($job in $localJobs) {
+        $destinations = @()
+        foreach ($dest in @($job.PeerDestinations)) {
+            $destinations += @{
+                hostname    = $dest.Hostname
+                tailscaleIp = $dest.TailscaleIP
+                location    = $dest.Location
+                basePath    = $dest.BasePath
+            }
+        }
+
+        $jobsPayload += @{
+            name             = $job.JobName
+            backupType       = if ($typeMap.ContainsKey($job.BackupType)) { $typeMap[$job.BackupType] } else { $job.BackupType }
+            backupObject     = $job.BackupObject
+            frequencyHours   = [int]($job.Frequency ?? 24)
+            retentionMonthly = [int]($job.RetentionMonthly ?? 3)
+            retentionWeekly  = [int]($job.RetentionWeekly ?? 4)
+            retentionRecent  = [int]($job.RetentionRecent ?? 7)
+            enabled          = [bool]($job.Enabled ?? $true)
+            destinations     = $destinations
+        }
+    }
+
+    $payload = @{
+        hostname    = $config.Hostname
+        tailscaleIp = $config.TailscaleIP
+        location    = $config.Location
+        projectId   = [long]$config.ProjectId
+        jobs        = $jobsPayload
+    } | ConvertTo-Json -Depth 10
+
+    try {
+        $response = Invoke-RestMethod `
+            -Uri       $endpoint `
+            -Method    POST `
+            -Body      $payload `
+            -ContentType 'application/json' `
+            -TimeoutSec 30 `
+            -ErrorAction Stop
+
+        # Persist the apiKey for use in heartbeats
+        if ($response.apiKey) {
+            $config | Add-Member -NotePropertyName 'RrmApiKey' -NotePropertyValue $response.apiKey -Force
+            Save-RingConfig -Config $config
+            Write-RRDebug "RRM API registration OK — peerId=$($response.peerId)"
+        }
+
+        return $response
+    }
+    catch {
+        # Non-fatal — peer still works without the API
+        Write-RRDebug "RRM API registration failed: $_"
+        Write-Warning "Could not register with RRM API. Peer works normally but won't appear in the monitor."
+        return $null
+    }
+}
+
+#endregion
+
 #region Add Storage Peer (P)
 
 function Add-StoragePeer {
@@ -1019,7 +1120,30 @@ function Add-StoragePeer {
     }
     
     Write-Host ""
-    
+
+    # Step 6b: RRM API Configuration (optional)
+    Write-Host "STEP 6b: RRM Monitor API (optional)" -ForegroundColor Yellow
+    Write-Host "-------------------------------------" -ForegroundColor Yellow
+    Write-Host "If you have a Resilience Ring Monitor URL and Project ID," -ForegroundColor Gray
+    Write-Host "this peer will register automatically and appear in the dashboard." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "RRM API URL (leave blank to skip): " -NoNewline -ForegroundColor White
+    $rrmApiUrl = (Read-Host).Trim()
+
+    $rrmProjectId = $null
+    if ($rrmApiUrl) {
+        Write-Host "Project ID (numeric): " -NoNewline -ForegroundColor White
+        $rrmProjectIdInput = (Read-Host).Trim()
+        if ($rrmProjectIdInput -match '^\d+$') {
+            $rrmProjectId = [long]$rrmProjectIdInput
+        } else {
+            Write-Host "[WARN] Invalid Project ID — RRM integration skipped." -ForegroundColor Yellow
+            $rrmApiUrl = $null
+        }
+    }
+
+    Write-Host ""
+
     # Step 7: Create Service Account
     Write-Host "STEP 7: Creating Service Account" -ForegroundColor Yellow
     Write-Host "---------------------------------" -ForegroundColor Yellow
@@ -1126,6 +1250,12 @@ function Add-StoragePeer {
         QuotaGB = $quotaGB
         CreatedAt = (Get-Date).ToString('o')
     }
+
+    # Add RRM API config if provided
+    if ($rrmApiUrl -and $rrmProjectId) {
+        $config['RrmApiUrl']   = $rrmApiUrl
+        $config['ProjectId']   = $rrmProjectId
+    }
     
     # Save local config
     Save-RingConfig -Config $config
@@ -1184,7 +1314,21 @@ function Add-StoragePeer {
     Write-Host "     in your Tailscale admin console: https://login.tailscale.com/admin/machines" -ForegroundColor Gray
     Write-Host "  2. Run 'Add Storage Peer' (P) on other machines with the SAME" -ForegroundColor White
     Write-Host "     Customer Code '$codename' to join this ring." -ForegroundColor Gray
-    
+
+    # Register with RRM API if configured
+    Write-Host ""
+    if ($config.RrmApiUrl -and $config.ProjectId) {
+        Write-Host "STEP 10: Registering with RRM API" -ForegroundColor Yellow
+        Write-Host "----------------------------------" -ForegroundColor Yellow
+        $apiResult = Register-PeerWithRrmApi -Config $config
+        if ($apiResult) {
+            Write-Host "[OK] Registered in RRM — peer ID: $($apiResult.peerId)" -ForegroundColor Green
+        } else {
+            Write-Host "[WARN] RRM registration skipped or failed (see log)" -ForegroundColor Yellow
+        }
+        Write-Host ""
+    }
+
     Read-Host "`nPress Enter to continue"
 }
 

@@ -523,6 +523,7 @@ function Show-MainMenu {
     Write-Host "   D. Discover & Update Peer List" -ForegroundColor White
     Write-Host "   T. Configure Tailscale Mode" -ForegroundColor White
     Write-Host "   R. Rebalance Storage" -ForegroundColor White
+    Write-Host "   M. Sync with RRM Monitor (re-register jobs)" -ForegroundColor White
 
     Write-Host ""
     Write-Host " STATUS" -ForegroundColor Yellow
@@ -562,6 +563,21 @@ function Start-MainLoop {
             "D" { Update-PeerList; Read-Host "`nPress Enter to continue" }
             "T" { Set-TailscaleMode }
             "R" { Invoke-StorageRebalance }
+            "M" {
+                Write-Host "`nSyncing with RRM Monitor..." -ForegroundColor Cyan
+                if (Get-Command 'Register-PeerWithRrmApi' -ErrorAction SilentlyContinue) {
+                    $result = Register-PeerWithRrmApi
+                    if ($result) {
+                        Write-Host "[OK] Sync complete — peer ID: $($result.peerId)" -ForegroundColor Green
+                    } else {
+                        Write-Host "[WARN] Sync failed or RrmApiUrl/ProjectId not configured." -ForegroundColor Yellow
+                        Write-Host "       Set RrmApiUrl and ProjectId in ring-config.json to enable." -ForegroundColor Gray
+                    }
+                } else {
+                    Write-Host "[WARN] Register-PeerWithRrmApi not available. Update PeerManagement.ps1." -ForegroundColor Yellow
+                }
+                Read-Host "`nPress Enter to continue"
+            }
             
             # Status
             "9" { Show-BackupStatus }
