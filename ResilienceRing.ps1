@@ -49,6 +49,7 @@ $script:DestinationsFile = Join-Path $DataPath "destinations.json"
 $script:JobsFile = Join-Path $DataPath "jobs.json"
 $script:LogPath = Join-Path $DataPath "Logs"
 $script:ExecutionScript = Join-Path $PSScriptRoot "Execute-Backup.ps1"
+$script:ErrorLogPath  = Join-Path $DataPath "Logs\rrm-startup-error.log"
 
 #region Update Management
 
@@ -601,6 +602,8 @@ function Start-MainLoop {
 
 #region Main Entry Point
 
+try {
+
 # Show banner
 Show-Banner
 
@@ -675,5 +678,48 @@ $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
 
 # Start main loop
 Start-MainLoop
+
+} catch {
+    # --- Global error handler ---
+    # Capture any unhandled exception, write it to a log file and keep the window open
+    # so the user (or VLABS team) can read the message and find the log.
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $errMsg    = $_.Exception.Message
+    $errStack  = $_.ScriptStackTrace
+
+    $logEntry = @"
+==========================================
+$timestamp  FATAL ERROR
+------------------------------------------
+$errMsg
+
+Stack trace:
+$errStack
+==========================================
+
+"@
+
+    try {
+        # Ensure Logs directory exists even if Initialize-Environment hasn't run yet
+        $logDir = Split-Path $script:ErrorLogPath -Parent
+        if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+        Add-Content -Path $script:ErrorLogPath -Value $logEntry -Encoding UTF8
+    } catch { <# silently ignore log write errors #> }
+
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Red
+    Write-Host "  RESILIENCE RING — ERROR AL INICIAR" -ForegroundColor Red
+    Write-Host "========================================" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  $errMsg" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Log guardado en:" -ForegroundColor Gray
+    Write-Host "  $($script:ErrorLogPath)" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Comparte ese archivo con VLABS para diagnosticar el problema." -ForegroundColor Gray
+    Write-Host ""
+    Read-Host "Presiona Enter para salir"
+    exit 1
+}
 
 #endregion
