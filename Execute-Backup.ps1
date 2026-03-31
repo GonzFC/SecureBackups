@@ -1130,6 +1130,102 @@ function Invoke-LegacyBackup {
 
 #endregion
 
+#region RRM Heartbeat
+
+function Send-RrmHeartbeat {
+    <#
+    .SYNOPSIS
+        Sends execution result for a single job to the RRM API heartbeat endpoint.
+        Updates peer status (online/last_seen), upserts the job, and records the execution.
+        Non-fatal — failures are logged as warnings only.
+    #>
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$JobName,
+
+        [Parameter(Mandatory=$true)]
+        [ValidateSet('Success','Failed','Warning','Running')]
+        [string]$Status,
+
+        [Parameter(Mandatory=$true)]
+        [string]$RanAt,          # ISO 8601 string — start time of the execution
+
+        [int]$DurationSeconds = 0,
+        [long]$SizeBytes      = 0,
+        [string]$ErrorMessage = $null
+    )
+
+    $config = Get-RingConfig
+    if (-not $config -or -not $config.RrmApiUrl -or -not $config.RrmApiKey) {
+        Write-Log "RRM heartbeat skipped: RrmApiUrl or RrmApiKey not in ring-config.json" -Level INFO
+        return
+    }
+
+    $apiUrl   = $config.RrmApiUrl.TrimEnd('/')
+    $endpoint = "$apiUrl/api/heartbeat"
+    $typeMap  = @{ 'F' = 'file'; 'D' = 'directory'; 'SQL' = 'database' }
+
+    # Load the job definition to send current config alongside the execution
+    $job = @(Get-Jobs) | Where-Object { $_.JobName -eq $JobName }
+    if (-not $job) {
+        Write-Log "RRM heartbeat skipped: job '$JobName' not found in jobs.json" -Level WARNING
+        return
+    }
+
+    $destinations = @()
+    foreach ($dest in @($job.PeerDestinations)) {
+        $destinations += @{
+            hostname    = $dest.Hostname
+            tailscaleIp = $dest.TailscaleIP
+            location    = $dest.Location
+            basePath    = $dest.BasePath
+        }
+    }
+
+    $payload = @{
+        hostname = $config.Hostname
+        jobs     = @(
+            @{
+                name             = $job.JobName
+                backupType       = if ($typeMap.ContainsKey($job.BackupType)) { $typeMap[$job.BackupType] } else { $job.BackupType }
+                backupObject     = $job.BackupObject
+                frequencyHours   = [int]($job.Frequency ?? 24)
+                retentionMonthly = [int]($job.RetentionMonthly ?? 3)
+                retentionWeekly  = [int]($job.RetentionWeekly ?? 4)
+                retentionRecent  = [int]($job.RetentionRecent ?? 7)
+                enabled          = [bool]($job.Enabled -ne $false)
+                lastExecution    = @{
+                    status       = $Status.ToLower()
+                    ranAt        = $RanAt
+                    durationSec  = $DurationSeconds
+                    sizeBytes    = $SizeBytes
+                    errorMessage = $ErrorMessage
+                }
+                destinations = $destinations
+            }
+        )
+    } | ConvertTo-Json -Depth 10
+
+    try {
+        Invoke-RestMethod `
+            -Uri         $endpoint `
+            -Method      POST `
+            -Headers     @{ 'X-Api-Key' = $config.RrmApiKey } `
+            -Body        $payload `
+            -ContentType 'application/json' `
+            -TimeoutSec  30 `
+            -ErrorAction Stop | Out-Null
+
+        Write-Log "RRM heartbeat OK — job='$JobName' status='$Status'" -Level INFO
+    }
+    catch {
+        # Non-fatal: peer keeps working even if the API is unreachable
+        Write-Log "RRM heartbeat failed (non-fatal): $_" -Level WARNING
+    }
+}
+
+#endregion
+
 #region Main
 
 function Invoke-BackupJob {
@@ -1193,12 +1289,22 @@ function Invoke-BackupJob {
         
         $finalStatus = if ($success) { "Success" } else { "Failed" }
         Update-JobStatus -JobName $JobName -Status $finalStatus -DurationSeconds $durationSeconds -SizeBytes $sizeBytes
-        
+
+        # Send heartbeat to RRM API
+        $errorMsg = if (-not $success) { "Backup failed — check log for details" } else { $null }
+        Send-RrmHeartbeat `
+            -JobName          $JobName `
+            -Status           $finalStatus `
+            -RanAt            $startTime.ToString('o') `
+            -DurationSeconds  $durationSeconds `
+            -SizeBytes        $sizeBytes `
+            -ErrorMessage     $errorMsg
+
         # After successful backup, enforce ring policies on job master data
         if ($success) {
             Invoke-RingPolicyEnforcement -JobName $JobName
         }
-        
+
         # Publish status to share for RRM
         Publish-NodeStatus
         
