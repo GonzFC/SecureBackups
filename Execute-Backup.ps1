@@ -1156,12 +1156,21 @@ function Send-RrmHeartbeat {
     )
 
     $config = Get-RingConfig
-    if (-not $config -or -not $config.RrmApiUrl -or -not $config.RrmApiKey) {
-        Write-Log "RRM heartbeat skipped: RrmApiUrl or RrmApiKey not in ring-config.json" -Level INFO
+    if (-not $config) {
+        Write-Log "RRM heartbeat skipped: no ring-config.json found" -Level INFO
         return
     }
 
-    $apiUrl   = $config.RrmApiUrl.TrimEnd('/')
+    # Use default URL for peers not yet configured with RRM
+    $rrmUrl = if ($config.RrmApiUrl) { $config.RrmApiUrl } else { 'https://api-test.mmi.lat/resilience-ring' }
+
+    # If no ApiKey, attempt registration first so we can send heartbeats
+    if (-not $config.RrmApiKey) {
+        Write-Log "RRM heartbeat skipped: RrmApiKey not set. Run option M in the menu to register." -Level INFO
+        return
+    }
+
+    $apiUrl   = $rrmUrl.TrimEnd('/')
     $endpoint = "$apiUrl/api/heartbeat"
     $typeMap  = @{ 'F' = 'file'; 'D' = 'directory'; 'SQL' = 'database' }
 

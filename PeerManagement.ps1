@@ -868,14 +868,14 @@ function Register-PeerWithRrmApi {
     $config = if ($Config) { $Config } else { Get-RingConfig }
     if (-not $config) { return }
 
-    # Skip if API URL or ProjectId not configured
-    if (-not $config.RrmApiUrl -or -not $config.ProjectId) {
-        Write-RRDebug "RRM API registration skipped: RrmApiUrl or ProjectId not set in ring-config.json"
-        return
-    }
+    # Use defaults for peers that haven't been configured with RRM yet
+    $defaultRrmUrl   = 'https://api-test.mmi.lat/resilience-ring'
+    $defaultProjectId = 1
 
-    $apiUrl   = $config.RrmApiUrl.TrimEnd('/')
-    $endpoint = "$apiUrl/api/peers/register"
+    $rrmUrl   = if ($config.RrmApiUrl)  { $config.RrmApiUrl }  else { $defaultRrmUrl }
+    $projId   = if ($config.ProjectId)  { $config.ProjectId }  else { $defaultProjectId }
+
+    $apiUrl   = $rrmUrl.TrimEnd('/')
 
     # Map BackupType codes to API strings
     $typeMap = @{ 'F' = 'file'; 'D' = 'directory'; 'SQL' = 'database' }
@@ -913,11 +913,13 @@ function Register-PeerWithRrmApi {
         }
     }
 
+    $endpoint = "$apiUrl/api/peers/register"
+
     $payload = @{
         hostname    = $config.Hostname
         tailscaleIp = $config.TailscaleIP
         location    = $config.Location
-        projectId   = [long]$config.ProjectId
+        projectId   = [long]$projId
         jobs        = $jobsPayload
     } | ConvertTo-Json -Depth 10
 
