@@ -254,6 +254,13 @@ try {
     $shortcut.Description = 'Resilience Ring - Distributed Backup System by VLABS'
     $shortcut.Save()
 
+    # Set "Run as Administrator" flag on the shortcut (required by #Requires -RunAsAdministrator)
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($shortcutPath)
+        $bytes[21] = $bytes[21] -bor 0x20
+        [System.IO.File]::WriteAllBytes($shortcutPath, $bytes)
+    } catch { <# non-critical #> }
+
     Write-ColorOutput "  Start Menu shortcut created" -Color Green
     Write-Host ""
 }
@@ -274,13 +281,13 @@ if ($response -eq '' -or $response -match '^[Yy]') {
     # Launch the app
     $mainScript = Join-Path $script:InstallPath 'ResilienceRing.ps1'
     if (Test-Path $mainScript) {
-        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$mainScript`"" -WorkingDirectory $script:InstallPath
+        Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$mainScript`"" -WorkingDirectory $script:InstallPath
     }
     else {
         # Fallback to old script name during transition
         $legacyScript = Join-Path $script:InstallPath 'VLABS-SecureBackup.ps1'
         if (Test-Path $legacyScript) {
-            Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$legacyScript`"" -WorkingDirectory $script:InstallPath
+            Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$legacyScript`"" -WorkingDirectory $script:InstallPath
         }
     }
 }
