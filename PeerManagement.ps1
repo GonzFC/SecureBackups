@@ -904,11 +904,11 @@ function Register-PeerWithRrmApi {
             name             = $job.JobName
             backupType       = if ($typeMap.ContainsKey($job.BackupType)) { $typeMap[$job.BackupType] } else { $job.BackupType }
             backupObject     = $job.BackupObject
-            frequencyHours   = [int]($job.Frequency ?? 24)
-            retentionMonthly = [int]($job.RetentionMonthly ?? 3)
-            retentionWeekly  = [int]($job.RetentionWeekly ?? 4)
-            retentionRecent  = [int]($job.RetentionRecent ?? 7)
-            enabled          = [bool]($job.Enabled ?? $true)
+            frequencyHours   = [int]$(if ($job.Frequency -ne $null) { $job.Frequency } else { 24 })
+            retentionMonthly = [int]$(if ($job.RetentionMonthly -ne $null) { $job.RetentionMonthly } else { 3 })
+            retentionWeekly  = [int]$(if ($job.RetentionWeekly -ne $null) { $job.RetentionWeekly } else { 4 })
+            retentionRecent  = [int]$(if ($job.RetentionRecent -ne $null) { $job.RetentionRecent } else { 7 })
+            enabled          = [bool]$(if ($job.Enabled -ne $null) { $job.Enabled } else { $true })
             destinations     = $destinations
         }
     }
