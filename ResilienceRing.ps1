@@ -441,65 +441,6 @@ function Invoke-LogArchival {
 
 #endregion
 
-#region Core Functions - Load from Legacy Script
-
-# Dot-source the legacy script to get all the backup functions
-$legacyScript = Join-Path $PSScriptRoot "VLABS-SecureBackup.ps1"
-if (Test-Path $legacyScript) {
-    try {
-        # Set environment variable to prevent legacy script from running its main loop
-        $env:RESILIENCE_RING_IMPORT = "1"
-        
-        # Dot-source to load all functions into current scope
-        . $legacyScript
-        
-        # Clear the environment variable
-        Remove-Item Env:RESILIENCE_RING_IMPORT -ErrorAction SilentlyContinue
-        
-        Write-Host "[OK] Core functions loaded" -ForegroundColor Green
-    }
-    catch {
-        Remove-Item Env:RESILIENCE_RING_IMPORT -ErrorAction SilentlyContinue
-        Write-Host "[ERROR] Failed to load core functions: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host ""
-        Read-Host "Press Enter to exit"
-        exit 1
-    }
-}
-else {
-    Write-Host "[ERROR] Core script not found: $legacyScript" -ForegroundColor Red
-    Write-Host "Please ensure VLABS-SecureBackup.ps1 is in the same directory." -ForegroundColor Yellow
-    Write-Host ""
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-
-# Load Peer Management functions
-$peerScript = Join-Path $PSScriptRoot "PeerManagement.ps1"
-if (Test-Path $peerScript) {
-    try {
-        . $peerScript
-        Write-Host "[OK] Peer management loaded" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "[WARN] Peer management not loaded: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-}
-
-# Load Backup Job functions (unified workflow)
-$backupJobScript = Join-Path $PSScriptRoot "BackupJob.ps1"
-if (Test-Path $backupJobScript) {
-    try {
-        . $backupJobScript
-        Write-Host "[OK] Backup job module loaded" -ForegroundColor Green
-    }
-    catch {
-        Write-Host "[WARN] Backup job module not loaded: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-}
-
-#endregion
-
 #region Main Menu
 
 function Show-MainMenu {
@@ -606,6 +547,35 @@ try {
 
 # Show banner
 Show-Banner
+
+# Load core functions
+$legacyScript = Join-Path $PSScriptRoot "VLABS-SecureBackup.ps1"
+if (Test-Path $legacyScript) {
+    $env:RESILIENCE_RING_IMPORT = "1"
+    . $legacyScript
+    Remove-Item Env:RESILIENCE_RING_IMPORT -ErrorAction SilentlyContinue
+    Write-Host "[OK] Core functions loaded" -ForegroundColor Green
+}
+else {
+    Write-Host "[ERROR] Core script not found: $legacyScript" -ForegroundColor Red
+    Write-Host "Please ensure VLABS-SecureBackup.ps1 is in the same directory." -ForegroundColor Yellow
+    Read-Host "`nPress Enter to exit"
+    exit 1
+}
+
+# Load Peer Management functions
+$peerScript = Join-Path $PSScriptRoot "PeerManagement.ps1"
+if (Test-Path $peerScript) {
+    try { . $peerScript; Write-Host "[OK] Peer management loaded" -ForegroundColor Green }
+    catch { Write-Host "[WARN] Peer management not loaded: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
+
+# Load Backup Job functions
+$backupJobScript = Join-Path $PSScriptRoot "BackupJob.ps1"
+if (Test-Path $backupJobScript) {
+    try { . $backupJobScript; Write-Host "[OK] Backup job module loaded" -ForegroundColor Green }
+    catch { Write-Host "[WARN] Backup job module not loaded: $($_.Exception.Message)" -ForegroundColor Yellow }
+}
 
 # Initialize environment
 Write-Host "Initializing..." -ForegroundColor Gray
