@@ -1127,8 +1127,10 @@ function Add-StoragePeer {
     Write-Host "If you have a Resilience Ring Monitor URL and Project ID," -ForegroundColor Gray
     Write-Host "this peer will register automatically and appear in the dashboard." -ForegroundColor Gray
     Write-Host ""
-    Write-Host "RRM API URL (leave blank to skip): " -NoNewline -ForegroundColor White
-    $rrmApiUrl = (Read-Host).Trim()
+    $rrmDefaultUrl = 'https://api-test.mmi.lat/resilience-ring'
+    Write-Host "RRM API URL [default: $rrmDefaultUrl] (leave blank to skip): " -NoNewline -ForegroundColor White
+    $rrmApiUrlInput = (Read-Host).Trim()
+    $rrmApiUrl = if ($rrmApiUrlInput) { $rrmApiUrlInput } else { $rrmDefaultUrl }
 
     $rrmProjectId = $null
     if ($rrmApiUrl) {
