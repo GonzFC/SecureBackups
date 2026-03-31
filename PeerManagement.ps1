@@ -855,7 +855,7 @@ function Register-PeerWithRrmApi {
     .SYNOPSIS
         Registers this peer with the Resilience Ring Monitor API.
         Sends peer info, jobs and destinations. Saves the returned apiKey to ring-config.json.
-        Safe to call multiple times — the API endpoint is idempotent.
+        Safe to call multiple times  -  the API endpoint is idempotent.
     .NOTES
         Requires ring-config.json to have RrmApiUrl and ProjectId set.
         If either is missing the function exits silently (not an error).
@@ -936,13 +936,13 @@ function Register-PeerWithRrmApi {
         if ($response.apiKey) {
             $config | Add-Member -NotePropertyName 'RrmApiKey' -NotePropertyValue $response.apiKey -Force
             Save-RingConfig -Config $config
-            Write-RRDebug "RRM API registration OK — peerId=$($response.peerId)"
+            Write-RRDebug "RRM API registration OK  -  peerId=$($response.peerId)"
         }
 
         return $response
     }
     catch {
-        # Non-fatal — peer still works without the API
+        # Non-fatal  -  peer still works without the API
         Write-RRDebug "RRM API registration failed: $_"
         Write-Warning "Could not register with RRM API. Peer works normally but won't appear in the monitor."
         return $null
@@ -1141,7 +1141,7 @@ function Add-StoragePeer {
         if ($rrmProjectIdInput -match '^\d+$') {
             $rrmProjectId = [long]$rrmProjectIdInput
         } else {
-            Write-Host "[WARN] Invalid Project ID — RRM integration skipped." -ForegroundColor Yellow
+            Write-Host "[WARN] Invalid Project ID  -  RRM integration skipped." -ForegroundColor Yellow
             $rrmApiUrl = $null
         }
     }
@@ -1326,7 +1326,7 @@ function Add-StoragePeer {
         Write-Host "----------------------------------" -ForegroundColor Yellow
         $apiResult = Register-PeerWithRrmApi -Config $config
         if ($apiResult) {
-            Write-Host "[OK] Registered in RRM — peer ID: $($apiResult.peerId)" -ForegroundColor Green
+            Write-Host "[OK] Registered in RRM  -  peer ID: $($apiResult.peerId)" -ForegroundColor Green
         } else {
             Write-Host "[WARN] RRM registration skipped or failed (see log)" -ForegroundColor Yellow
         }

@@ -843,7 +843,7 @@ function Invoke-BackupToPeer {
     $peerIP = $Peer.TailscaleIP
     # Support both BasePath (correct) and SharePath (legacy/bug) property names
     $basePath = if ($Peer.BasePath) { $Peer.BasePath } else { $Peer.SharePath }
-    # Fallback chain for app name: AppNameClean → AppName → JobName
+    # Fallback chain for app name: AppNameClean -> AppName -> JobName
     $appName = if ($Job.AppNameClean) { $Job.AppNameClean } elseif ($Job.AppName) { $Job.AppName } else { $Job.JobName }
     # CustomerCode from job, or fall back to ring-config
     $customerCode = if ($Job.CustomerCode) { $Job.CustomerCode } else { (Get-RingConfig).CustomerCode }
@@ -1137,7 +1137,7 @@ function Send-RrmHeartbeat {
     .SYNOPSIS
         Sends execution result for a single job to the RRM API heartbeat endpoint.
         Updates peer status (online/last_seen), upserts the job, and records the execution.
-        Non-fatal — failures are logged as warnings only.
+        Non-fatal  -  failures are logged as warnings only.
     #>
     param(
         [Parameter(Mandatory=$true)]
@@ -1148,7 +1148,7 @@ function Send-RrmHeartbeat {
         [string]$Status,
 
         [Parameter(Mandatory=$true)]
-        [string]$RanAt,          # ISO 8601 string — start time of the execution
+        [string]$RanAt,          # ISO 8601 string  -  start time of the execution
 
         [int]$DurationSeconds = 0,
         [long]$SizeBytes      = 0,
@@ -1225,7 +1225,7 @@ function Send-RrmHeartbeat {
             -TimeoutSec  30 `
             -ErrorAction Stop | Out-Null
 
-        Write-Log "RRM heartbeat OK — job='$JobName' status='$Status'" -Level INFO
+        Write-Log "RRM heartbeat OK  -  job='$JobName' status='$Status'" -Level INFO
     }
     catch {
         # Non-fatal: peer keeps working even if the API is unreachable
@@ -1300,7 +1300,7 @@ function Invoke-BackupJob {
         Update-JobStatus -JobName $JobName -Status $finalStatus -DurationSeconds $durationSeconds -SizeBytes $sizeBytes
 
         # Send heartbeat to RRM API
-        $errorMsg = if (-not $success) { "Backup failed — check log for details" } else { $null }
+        $errorMsg = if (-not $success) { "Backup failed  -  check log for details" } else { $null }
         Send-RrmHeartbeat `
             -JobName          $JobName `
             -Status           $finalStatus `

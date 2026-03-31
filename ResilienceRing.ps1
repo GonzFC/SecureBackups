@@ -569,7 +569,7 @@ function Start-MainLoop {
                 if (Get-Command 'Register-PeerWithRrmApi' -ErrorAction SilentlyContinue) {
                     $result = Register-PeerWithRrmApi
                     if ($result) {
-                        Write-Host "[OK] Sync complete — peer ID: $($result.peerId)" -ForegroundColor Green
+                        Write-Host "[OK] Sync complete  -  peer ID: $($result.peerId)" -ForegroundColor Green
                     } else {
                         Write-Host "[WARN] Sync failed or RrmApiUrl/ProjectId not configured." -ForegroundColor Yellow
                         Write-Host "       Set RrmApiUrl and ProjectId in ring-config.json to enable." -ForegroundColor Gray
@@ -708,7 +708,7 @@ $errStack
 
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Red
-    Write-Host "  RESILIENCE RING — ERROR AL INICIAR" -ForegroundColor Red
+    Write-Host "  RESILIENCE RING  -  ERROR AL INICIAR" -ForegroundColor Red
     Write-Host "========================================" -ForegroundColor Red
     Write-Host ""
     Write-Host "  $errMsg" -ForegroundColor Yellow
