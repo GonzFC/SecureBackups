@@ -950,19 +950,15 @@ function Register-PeerWithRrmApi {
     }
     catch {
         # Non-fatal  -  peer still works without the API
-        $errMsg = $_.Exception.Message
-        # Try to read the HTTP response body for more detail (e.g. "Project not found")
-        try {
-            $resp = $_.Exception.Response
-            if ($resp) {
-                $stream = $resp.GetResponseStream()
-                $reader = New-Object System.IO.StreamReader($stream)
-                $body   = $reader.ReadToEnd()
-                if ($body) { $errMsg = $body.Trim('"') }
-            }
-        } catch {}
+        # PS5.1: ErrorDetails.Message contains the HTTP response body
+        $errMsg = if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            $_.ErrorDetails.Message.Trim('"')
+        } else {
+            $_.Exception.Message
+        }
         Write-RRDebug "RRM API registration failed: $errMsg"
         Write-Warning "Could not register with RRM API: $errMsg"
+        Write-Warning "  URL: $endpoint | hostname: $hostname | projectId: $projId | location: $($config.Location)"
         return $null
     }
 }
