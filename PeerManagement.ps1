@@ -873,7 +873,7 @@ function Register-PeerWithRrmApi {
     $defaultProjectId = 1
 
     $rrmUrl   = if ($config.RrmApiUrl)  { $config.RrmApiUrl }  else { $defaultRrmUrl }
-    $projId   = if ($config.ProjectId)  { $config.ProjectId }  else { $defaultProjectId }
+    $projId   = if ($config.ProjectId -ne $null) { $config.ProjectId | Select-Object -First 1 } else { $defaultProjectId }
 
     $apiUrl   = $rrmUrl.TrimEnd('/')
 
@@ -904,11 +904,11 @@ function Register-PeerWithRrmApi {
             name             = $job.JobName
             backupType       = if ($typeMap.ContainsKey($job.BackupType)) { $typeMap[$job.BackupType] } else { $job.BackupType }
             backupObject     = $job.BackupObject
-            frequencyHours   = [int]$(if ($job.Frequency -ne $null) { $job.Frequency } else { 24 })
-            retentionMonthly = [int]$(if ($job.RetentionMonthly -ne $null) { $job.RetentionMonthly } else { 3 })
-            retentionWeekly  = [int]$(if ($job.RetentionWeekly -ne $null) { $job.RetentionWeekly } else { 4 })
-            retentionRecent  = [int]$(if ($job.RetentionRecent -ne $null) { $job.RetentionRecent } else { 7 })
-            enabled          = [bool]$(if ($job.Enabled -ne $null) { $job.Enabled } else { $true })
+            frequencyHours   = [int]$(if ($job.Frequency -ne $null) { $job.Frequency | Select-Object -First 1 } else { 24 })
+            retentionMonthly = [int]$(if ($job.RetentionMonthly -ne $null) { $job.RetentionMonthly | Select-Object -First 1 } else { 3 })
+            retentionWeekly  = [int]$(if ($job.RetentionWeekly -ne $null) { $job.RetentionWeekly | Select-Object -First 1 } else { 4 })
+            retentionRecent  = [int]$(if ($job.RetentionRecent -ne $null) { $job.RetentionRecent | Select-Object -First 1 } else { 7 })
+            enabled          = [bool]$(if ($job.Enabled -ne $null) { $job.Enabled | Select-Object -First 1 } else { $true })
             destinations     = $destinations
         }
     }

@@ -1198,10 +1198,10 @@ function Send-RrmHeartbeat {
                 name             = $job.JobName
                 backupType       = if ($typeMap.ContainsKey($job.BackupType)) { $typeMap[$job.BackupType] } else { $job.BackupType }
                 backupObject     = $job.BackupObject
-                frequencyHours   = [int]$(if ($job.Frequency -ne $null) { $job.Frequency } else { 24 })
-                retentionMonthly = [int]$(if ($job.RetentionMonthly -ne $null) { $job.RetentionMonthly } else { 3 })
-                retentionWeekly  = [int]$(if ($job.RetentionWeekly -ne $null) { $job.RetentionWeekly } else { 4 })
-                retentionRecent  = [int]$(if ($job.RetentionRecent -ne $null) { $job.RetentionRecent } else { 7 })
+                frequencyHours   = [int]$(if ($job.Frequency -ne $null) { $job.Frequency | Select-Object -First 1 } else { 24 })
+                retentionMonthly = [int]$(if ($job.RetentionMonthly -ne $null) { $job.RetentionMonthly | Select-Object -First 1 } else { 3 })
+                retentionWeekly  = [int]$(if ($job.RetentionWeekly -ne $null) { $job.RetentionWeekly | Select-Object -First 1 } else { 4 })
+                retentionRecent  = [int]$(if ($job.RetentionRecent -ne $null) { $job.RetentionRecent | Select-Object -First 1 } else { 7 })
                 enabled          = [bool]($job.Enabled -ne $false)
                 lastExecution    = @{
                     status       = $Status.ToLower()
