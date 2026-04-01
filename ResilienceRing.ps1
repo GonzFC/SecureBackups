@@ -510,6 +510,7 @@ function Show-MainMenu {
     Write-Host " SYSTEM" -ForegroundColor Yellow
     Write-Host "   U. Check for Updates" -ForegroundColor White
     Write-Host "   0. Exit" -ForegroundColor White
+    Write-Host "   X. Uninstall Resilience Ring" -ForegroundColor DarkRed
 
     Write-Host "`n========================================" -ForegroundColor Cyan
 }
@@ -560,6 +561,7 @@ function Start-MainLoop {
 
             # System
             "U" { Invoke-SelfUpdate }
+            "X" { Invoke-Uninstall }
             "0" {
                 Write-Host "`nExiting Resilience Ring..." -ForegroundColor Cyan
                 Write-Log "Application closed" -Level INFO
