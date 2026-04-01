@@ -915,13 +915,20 @@ function Register-PeerWithRrmApi {
 
     $endpoint = "$apiUrl/api/peers/register"
 
+    # Hostname fallback: ring-config.json from older installs may not have this field
+    $hostname = if ($config.Hostname) { $config.Hostname } `
+                elseif ($config.WindowsHostname) { $config.WindowsHostname } `
+                else { $env:COMPUTERNAME }
+
     $payload = @{
-        hostname    = $config.Hostname
+        hostname    = $hostname
         tailscaleIp = $config.TailscaleIP
         location    = $config.Location
         projectId   = [long]$projId
         jobs        = $jobsPayload
     } | ConvertTo-Json -Depth 10
+
+    Write-RRDebug "RRM register payload: hostname=$hostname projectId=$projId location=$($config.Location) jobs=$($jobsPayload.Count)"
 
     try {
         $response = Invoke-RestMethod `
