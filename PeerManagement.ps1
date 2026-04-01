@@ -988,12 +988,19 @@ function Register-PeerWithRrmApi {
     catch {
         # Non-fatal  -  peer still works without the API
         # PS5.1: ErrorDetails.Message contains the HTTP response body
-        $errMsg = if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+        $rawErr = if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
             $_.ErrorDetails.Message.Trim('"')
         } else {
             $_.Exception.Message
         }
-        Write-RRDebug "RRM API registration failed: $errMsg"
+        # If the server returned an HTML page (e.g. IIS 500.30), show a clean summary
+        $errMsg = if ($rawErr -match '<html|<!DOCTYPE|HTTP Error') {
+            $statusMatch = [regex]::Match($rawErr, 'HTTP Error [\d\.]+[^<]*')
+            if ($statusMatch.Success) { $statusMatch.Value.Trim() } else { 'Server returned an HTML error page (check API status)' }
+        } else {
+            $rawErr
+        }
+        Write-RRDebug "RRM API registration failed: $rawErr"
         Write-Warning "Could not register with RRM API: $errMsg"
         Write-Warning "  URL: $endpoint | hostname: $hostname | projectId: $projId | location: $($config.Location)"
         return $null
