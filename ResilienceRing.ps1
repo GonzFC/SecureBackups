@@ -510,7 +510,10 @@ function Show-MainMenu {
     Write-Host " SYSTEM" -ForegroundColor Yellow
     Write-Host "   U. Check for Updates" -ForegroundColor White
     Write-Host "   0. Exit" -ForegroundColor White
-    Write-Host "   X. Uninstall Resilience Ring" -ForegroundColor DarkRed
+
+    Write-Host ""
+    Write-Host " ADVANCED" -ForegroundColor DarkGray
+    Write-Host "   X. Uninstall Resilience Ring" -ForegroundColor Red
 
     Write-Host "`n========================================" -ForegroundColor Cyan
 }

@@ -1575,83 +1575,164 @@ function Update-PeerList {
     Write-Host "[OK] Found $($taggedPeers.Count) peer(s) with tag" -ForegroundColor Green
     Write-Host ""
     
-    # Step 2: For each peer, check RR_Backups share and read peer-info.json
-    Write-Host "Step 2: Scanning peers for storage configuration..." -ForegroundColor Yellow
+    # Step 2: Scan peers in parallel using runspace pool
+    Write-Host "Step 2: Scanning peers for storage configuration (parallel)..." -ForegroundColor Yellow
     Write-Host ""
-    
-    $discoveredPeers = @()
-    $skippedPeers = @()
-    
-    foreach ($peer in $taggedPeers) {
-        Write-Host "  Checking $($peer.HostName) ($($peer.TailscaleIP))..." -NoNewline -ForegroundColor Gray
-        
+
+    # Script executed in each runspace — no external function dependencies
+    $scanScript = {
+        param($Peer, $CustomerCode, $SelfIP)
+
+        $result = [PSCustomObject]@{
+            Hostname    = $Peer.HostName
+            TailscaleIP = $Peer.TailscaleIP
+            Status      = 'unknown'
+            Reason      = ''
+            PingMs      = -1
+            PeerInfo    = $null
+        }
+
         # Skip self
-        if ($peer.TailscaleIP -eq $config.TailscaleIP) {
-            Write-Host " [SELF]" -ForegroundColor DarkGray
-            continue
+        if ($Peer.TailscaleIP -eq $SelfIP) {
+            $result.Status = 'self'
+            return $result
         }
-        
-        # Test ping
-        $pingResult = Test-PeerPing -TailscaleIP $peer.TailscaleIP
-        if (-not $pingResult.Success) {
-            Write-Host " [PING FAILED]" -ForegroundColor Red
-            $skippedPeers += @{ Hostname = $peer.HostName; Reason = "Ping failed" }
-            continue
+
+        # Ping (2 attempts, 2s timeout each)
+        try {
+            $pinger = New-Object System.Net.NetworkInformation.Ping
+            for ($i = 1; $i -le 2; $i++) {
+                $ping = $pinger.Send($Peer.TailscaleIP, 2000)
+                if ($ping.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                    $result.PingMs = $ping.RoundtripTime
+                    break
+                }
+                if ($i -lt 2) { Start-Sleep -Milliseconds 300 }
+            }
+        } catch {}
+
+        if ($result.PingMs -lt 0) {
+            $result.Status = 'ping_failed'
+            $result.Reason = 'Ping failed'
+            return $result
         }
-        
-        # Connect with service account credentials
-        $connected = Connect-RingShare -TailscaleIP $peer.TailscaleIP -CustomerCode $config.CustomerCode
-        if (-not $connected) {
-            Write-Host " [AUTH FAILED]" -ForegroundColor Yellow
-            $skippedPeers += @{ Hostname = $peer.HostName; Reason = "SMB authentication failed" }
-            continue
+
+        # Derive service password (same algorithm as Get-RingServicePassword)
+        $salt     = "ResilienceRing2026!"
+        $sha256   = [System.Security.Cryptography.SHA256]::Create()
+        $bytes    = [System.Text.Encoding]::UTF8.GetBytes("$CustomerCode$salt")
+        $hash     = $sha256.ComputeHash($bytes)
+        $password = ([BitConverter]::ToString($hash) -replace '-', '').Substring(0, 12) + "Rr1!"
+
+        $sharePath = "\\$($Peer.TailscaleIP)\RR_Backups"
+
+        # SMB connect
+        net use $sharePath /delete 2>$null | Out-Null
+        net use $sharePath /user:RR_Service $password 2>&1 | Out-Null
+
+        if ($LASTEXITCODE -ne 0) {
+            $result.Status = 'auth_failed'
+            $result.Reason = 'SMB authentication failed'
+            return $result
         }
-        
-        # Test SMB share access
-        $sharePath = "\\$($peer.TailscaleIP)\$(Get-RRShareName)"
-        $shareExists = Test-Path $sharePath -ErrorAction SilentlyContinue
-        if (-not $shareExists) {
-            Write-Host " [NO SHARE]" -ForegroundColor Yellow
-            $skippedPeers += @{ Hostname = $peer.HostName; Reason = "RR_Backups share not found" }
-            Disconnect-RingShare -TailscaleIP $peer.TailscaleIP
-            continue
+
+        # Check share reachability
+        $shareOk = Test-Path $sharePath -ErrorAction SilentlyContinue
+        if (-not $shareOk) {
+            net use $sharePath /delete 2>$null | Out-Null
+            $result.Status = 'no_share'
+            $result.Reason = 'RR_Backups share not found'
+            return $result
         }
-        
+
         # Read peer-info.json
-        $peerInfo = Get-PeerInfo -TailscaleIP $peer.TailscaleIP
-        if (-not $peerInfo) {
-            Write-Host " [NO INFO]" -ForegroundColor Yellow
-            $skippedPeers += @{ Hostname = $peer.HostName; Reason = "peer-info.json not found" }
-            Disconnect-RingShare -TailscaleIP $peer.TailscaleIP
-            continue
+        try {
+            $infoPath = "$sharePath\peer-info.json"
+            if (Test-Path $infoPath -ErrorAction SilentlyContinue) {
+                $content = Get-Content $infoPath -Raw -ErrorAction SilentlyContinue
+                if ($content) { $result.PeerInfo = $content | ConvertFrom-Json }
+            }
+        } catch {}
+
+        net use $sharePath /delete 2>$null | Out-Null
+
+        if (-not $result.PeerInfo) {
+            $result.Status = 'no_info'
+            $result.Reason = 'peer-info.json not found'
+            return $result
         }
-        
-        # Verify codename matches
-        if ($peerInfo.CustomerCode -ne $config.CustomerCode) {
-            Write-Host " [CODENAME MISMATCH]" -ForegroundColor Yellow
-            $skippedPeers += @{ Hostname = $peer.HostName; Reason = "Different customer code: $($peerInfo.CustomerCode)" }
-            Disconnect-RingShare -TailscaleIP $peer.TailscaleIP
-            continue
+
+        if ($result.PeerInfo.CustomerCode -ne $CustomerCode) {
+            $result.Status = 'mismatch'
+            $result.Reason  = "Different customer code: $($result.PeerInfo.CustomerCode)"
+            return $result
         }
-        
-        Write-Host " [OK - $($pingResult.PingMs)ms]" -ForegroundColor Green
-        
-        # Use Tailscale hostname from peer-info if available, otherwise from Tailscale status
-        $peerHostname = if ($peerInfo.Hostname) { $peerInfo.Hostname } else { $peer.HostName }
-        
-        $discoveredPeers += [PSCustomObject]@{
-            Hostname = $peerHostname
-            TailscaleIP = $peer.TailscaleIP
-            CustomerCode = $peerInfo.CustomerCode
-            Location = $peerInfo.Location
-            AddedAt = (Get-Date).ToString('o')
-            QuotaGB = $peerInfo.QuotaGB
-        }
-        
-        # Disconnect after reading info
-        Disconnect-RingShare -TailscaleIP $peer.TailscaleIP
+
+        $result.Status = 'ok'
+        return $result
     }
-    
+
+    # Launch all runspaces (max 15 concurrent)
+    $maxConcurrent  = 15
+    $runspacePool   = [RunspaceFactory]::CreateRunspacePool(1, $maxConcurrent)
+    $runspacePool.Open()
+
+    $jobs = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($peer in $taggedPeers) {
+        $ps = [PowerShell]::Create()
+        $ps.RunspacePool = $runspacePool
+        $ps.AddScript($scanScript)          | Out-Null
+        $ps.AddParameter('Peer',          $peer)                  | Out-Null
+        $ps.AddParameter('CustomerCode',  $config.CustomerCode)   | Out-Null
+        $ps.AddParameter('SelfIP',        $config.TailscaleIP)    | Out-Null
+        $jobs.Add([PSCustomObject]@{ PS = $ps; Handle = $ps.BeginInvoke(); Peer = $peer })
+    }
+
+    # Collect results as they finish — print immediately when each job completes
+    $discoveredPeers = @()
+    $skippedPeers    = @()
+    $done            = 0
+    $total           = $jobs.Count
+
+    while ($done -lt $total) {
+        foreach ($job in ($jobs | Where-Object { $_.Handle -ne $null -and $_.Handle.IsCompleted })) {
+            $r = $job.PS.EndInvoke($job.Handle)
+            $job.PS.Dispose()
+            $job.Handle = $null
+            $done++
+
+            switch ($r.Status) {
+                'self'        { Write-Host "  $($r.Hostname) ($($r.TailscaleIP))... [SELF]" -ForegroundColor DarkGray }
+                'ping_failed' { Write-Host "  $($r.Hostname) ($($r.TailscaleIP))... [PING FAILED]" -ForegroundColor Red
+                                $skippedPeers += @{ Hostname = $r.Hostname; Reason = $r.Reason } }
+                'auth_failed' { Write-Host "  $($r.Hostname) ($($r.TailscaleIP))... [AUTH FAILED]" -ForegroundColor Yellow
+                                $skippedPeers += @{ Hostname = $r.Hostname; Reason = $r.Reason } }
+                'no_share'    { Write-Host "  $($r.Hostname) ($($r.TailscaleIP))... [NO SHARE]" -ForegroundColor Yellow
+                                $skippedPeers += @{ Hostname = $r.Hostname; Reason = $r.Reason } }
+                'no_info'     { Write-Host "  $($r.Hostname) ($($r.TailscaleIP))... [NO INFO]" -ForegroundColor Yellow
+                                $skippedPeers += @{ Hostname = $r.Hostname; Reason = $r.Reason } }
+                'mismatch'    { Write-Host "  $($r.Hostname) ($($r.TailscaleIP))... [CODENAME MISMATCH]" -ForegroundColor Yellow
+                                $skippedPeers += @{ Hostname = $r.Hostname; Reason = $r.Reason } }
+                'ok'          {
+                    Write-Host "  $($r.Hostname) ($($r.TailscaleIP))... [OK - $($r.PingMs)ms]" -ForegroundColor Green
+                    $peerHostname = if ($r.PeerInfo.Hostname) { $r.PeerInfo.Hostname } else { $r.Hostname }
+                    $discoveredPeers += [PSCustomObject]@{
+                        Hostname     = $peerHostname
+                        TailscaleIP  = $r.TailscaleIP
+                        CustomerCode = $r.PeerInfo.CustomerCode
+                        Location     = $r.PeerInfo.Location
+                        AddedAt      = (Get-Date).ToString('o')
+                        QuotaGB      = $r.PeerInfo.QuotaGB
+                    }
+                }
+            }
+        }
+        if ($done -lt $total) { Start-Sleep -Milliseconds 100 }
+    }
+
+    $runspacePool.Close()
+    $runspacePool.Dispose()
+
     Write-Host ""
     
     # Step 3: Merge into local list
