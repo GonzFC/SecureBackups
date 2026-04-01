@@ -888,19 +888,21 @@ function Register-PeerWithRrmApi {
     }
 
     # Build jobs payload
-    $jobsPayload = @()
+    # PS5.1 fix: use Generic.List so ConvertTo-Json always emits a JSON array
+    # (PS5.1 serializes @() as null and single-element @(...) as {} instead of [...])
+    $jobsPayload = New-Object System.Collections.Generic.List[object]
     foreach ($job in $localJobs) {
-        $destinations = @()
+        $destinations = New-Object System.Collections.Generic.List[object]
         foreach ($dest in @($job.PeerDestinations)) {
-            $destinations += @{
+            $destinations.Add(@{
                 hostname    = $dest.Hostname
                 tailscaleIp = $dest.TailscaleIP
                 location    = $dest.Location
                 basePath    = $dest.BasePath
-            }
+            })
         }
 
-        $jobsPayload += @{
+        $jobsPayload.Add(@{
             name             = $job.JobName
             backupType       = if ($typeMap.ContainsKey($job.BackupType)) { $typeMap[$job.BackupType] } else { $job.BackupType }
             backupObject     = $job.BackupObject
@@ -910,7 +912,7 @@ function Register-PeerWithRrmApi {
             retentionRecent  = [int]$(if ($job.RetentionRecent -ne $null) { $job.RetentionRecent | Select-Object -First 1 } else { 7 })
             enabled          = [bool]$(if ($job.Enabled -ne $null) { $job.Enabled | Select-Object -First 1 } else { $true })
             destinations     = $destinations
-        }
+        })
     }
 
     $endpoint = "$apiUrl/api/peers/register"
@@ -929,6 +931,7 @@ function Register-PeerWithRrmApi {
     } | ConvertTo-Json -Depth 10
 
     Write-RRDebug "RRM register payload: hostname=$hostname projectId=$projId location=$($config.Location) jobs=$($jobsPayload.Count)"
+    Write-Host "DEBUG payload: $($payload.Substring(0, [Math]::Min(600, $payload.Length)))" -ForegroundColor DarkGray
 
     try {
         $response = Invoke-RestMethod `
@@ -939,11 +942,23 @@ function Register-PeerWithRrmApi {
             -TimeoutSec 30 `
             -ErrorAction Stop
 
-        # Persist the apiKey for use in heartbeats
+        # Persist registration data for use in heartbeats
         if ($response.apiKey) {
-            $config | Add-Member -NotePropertyName 'RrmApiKey' -NotePropertyValue $response.apiKey -Force
+            $config | Add-Member -NotePropertyName 'RrmApiKey'   -NotePropertyValue $response.apiKey -Force
+            $config | Add-Member -NotePropertyName 'ProjectId'   -NotePropertyValue $projId          -Force
+
+            # Always persist the URL that actually worked so it's explicit in the config.
+            # If the API returns a new canonical URL (migration from test→prod), adopt it
+            # automatically so next calls go to the right place without manual intervention.
+            $canonicalUrl = if ($response.rrmApiUrl) { $response.rrmApiUrl.TrimEnd('/') } else { $apiUrl }
+            $config | Add-Member -NotePropertyName 'RrmApiUrl' -NotePropertyValue $canonicalUrl -Force
+
+            if ($response.rrmApiUrl -and $response.rrmApiUrl.TrimEnd('/') -ne $apiUrl) {
+                Write-Host "  [RRM] API URL updated: $apiUrl → $canonicalUrl" -ForegroundColor Cyan
+            }
+
             Save-RingConfig -Config $config
-            Write-RRDebug "RRM API registration OK  -  peerId=$($response.peerId)"
+            Write-RRDebug "RRM API registration OK  -  peerId=$($response.peerId) url=$canonicalUrl"
         }
 
         return $response
