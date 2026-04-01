@@ -903,10 +903,16 @@ function Register-PeerWithRrmApi {
             })
         }
 
+        # PS5.1: numeric/string fields from ConvertFrom-Json can be arrays when
+        # a single job covers multiple SQL instances (JobName, BackupType, BackupObject are parallel arrays)
+        $jobName   = if ($job.JobName   -is [array]) { $job.JobName   -join '|' } else { [string]$job.JobName }
+        $jobBt     = if ($job.BackupType -is [array]) { $job.BackupType | Select-Object -First 1 } else { $job.BackupType }
+        $jobObject = if ($job.BackupObject -is [array]) { $job.BackupObject -join '|' } else { [string]$job.BackupObject }
+
         $jobsPayload.Add(@{
-            name             = $job.JobName
-            backupType       = if ($typeMap.ContainsKey($job.BackupType)) { $typeMap[$job.BackupType] } else { $job.BackupType }
-            backupObject     = if ($job.BackupObject -is [array]) { $job.BackupObject -join '|' } else { [string]$job.BackupObject }
+            name             = $jobName
+            backupType       = if ($typeMap.ContainsKey($jobBt)) { $typeMap[$jobBt] } else { [string]$jobBt }
+            backupObject     = $jobObject
             frequencyHours   = [int]$(if ($job.Frequency -ne $null) { $job.Frequency | Select-Object -First 1 } else { 24 })
             retentionMonthly = [int]$(if ($job.RetentionMonthly -ne $null) { $job.RetentionMonthly | Select-Object -First 1 } else { 3 })
             retentionWeekly  = [int]$(if ($job.RetentionWeekly -ne $null) { $job.RetentionWeekly | Select-Object -First 1 } else { 4 })
