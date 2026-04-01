@@ -903,23 +903,37 @@ function Register-PeerWithRrmApi {
             })
         }
 
-        # PS5.1: numeric/string fields from ConvertFrom-Json can be arrays when
-        # a single job covers multiple SQL instances (JobName, BackupType, BackupObject are parallel arrays)
-        $jobName   = if ($job.JobName   -is [array]) { $job.JobName   -join '|' } else { [string]$job.JobName }
-        $jobBt     = if ($job.BackupType -is [array]) { $job.BackupType | Select-Object -First 1 } else { $job.BackupType }
-        $jobObject = if ($job.BackupObject -is [array]) { $job.BackupObject -join '|' } else { [string]$job.BackupObject }
+        # Shared fields (same for all instances in this job entry)
+        $freqHours       = [int]$(if ($job.Frequency        -ne $null) { $job.Frequency        | Select-Object -First 1 } else { 24 })
+        $retMonthly      = [int]$(if ($job.RetentionMonthly -ne $null) { $job.RetentionMonthly | Select-Object -First 1 } else { 3 })
+        $retWeekly       = [int]$(if ($job.RetentionWeekly  -ne $null) { $job.RetentionWeekly  | Select-Object -First 1 } else { 4 })
+        $retRecent       = [int]$(if ($job.RetentionRecent  -ne $null) { $job.RetentionRecent  | Select-Object -First 1 } else { 7 })
+        $jobEnabled      = [bool]$(if ($job.Enabled         -ne $null) { $job.Enabled          | Select-Object -First 1 } else { $true })
 
-        $jobsPayload.Add(@{
-            name             = $jobName
-            backupType       = if ($typeMap.ContainsKey($jobBt)) { $typeMap[$jobBt] } else { [string]$jobBt }
-            backupObject     = $jobObject
-            frequencyHours   = [int]$(if ($job.Frequency -ne $null) { $job.Frequency | Select-Object -First 1 } else { 24 })
-            retentionMonthly = [int]$(if ($job.RetentionMonthly -ne $null) { $job.RetentionMonthly | Select-Object -First 1 } else { 3 })
-            retentionWeekly  = [int]$(if ($job.RetentionWeekly -ne $null) { $job.RetentionWeekly | Select-Object -First 1 } else { 4 })
-            retentionRecent  = [int]$(if ($job.RetentionRecent -ne $null) { $job.RetentionRecent | Select-Object -First 1 } else { 7 })
-            enabled          = [bool]$(if ($job.Enabled -ne $null) { $job.Enabled | Select-Object -First 1 } else { $true })
-            destinations     = $destinations
-        })
+        # When a single jobs.json entry covers multiple SQL instances, JobName/BackupType/BackupObject
+        # are stored as parallel arrays — expand each into its own API job so the dashboard shows them separately.
+        $jobNames   = if ($job.JobName    -is [array]) { $job.JobName    } else { @($job.JobName) }
+        $jobTypes   = if ($job.BackupType -is [array]) { $job.BackupType } else { @($job.BackupType) }
+        $jobObjects = if ($job.BackupObject -is [array]) { $job.BackupObject } else { @($job.BackupObject) }
+
+        for ($i = 0; $i -lt $jobNames.Count; $i++) {
+            $jName   = [string]$jobNames[$i]
+            $jBt     = [string]$jobTypes[$i]
+            $jObject = [string]$jobObjects[$i]
+            if (-not $jName) { continue }
+
+            $jobsPayload.Add(@{
+                name             = $jName
+                backupType       = if ($typeMap.ContainsKey($jBt)) { $typeMap[$jBt] } else { $jBt }
+                backupObject     = $jObject
+                frequencyHours   = $freqHours
+                retentionMonthly = $retMonthly
+                retentionWeekly  = $retWeekly
+                retentionRecent  = $retRecent
+                enabled          = $jobEnabled
+                destinations     = $destinations
+            })
+        }
     }
 
     $endpoint = "$apiUrl/api/peers/register"
