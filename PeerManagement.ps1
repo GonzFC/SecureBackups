@@ -938,7 +938,6 @@ function Register-PeerWithRrmApi {
     } | ConvertTo-Json -Depth 10
 
     Write-RRDebug "RRM register payload: hostname=$hostname projectId=$projId location=$($config.Location) jobs=$($jobsPayload.Count)"
-    Write-Host "DEBUG payload: $payload" -ForegroundColor DarkGray
 
     try {
         $response = Invoke-RestMethod `

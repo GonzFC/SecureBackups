@@ -547,8 +547,7 @@ function Start-MainLoop {
                     if ($result) {
                         Write-Host "[OK] Sync complete  -  peer ID: $($result.peerId)" -ForegroundColor Green
                     } else {
-                        Write-Host "[WARN] Sync failed or RrmApiUrl/ProjectId not configured." -ForegroundColor Yellow
-                        Write-Host "       Set RrmApiUrl and ProjectId in ring-config.json to enable." -ForegroundColor Gray
+                        Write-Host "[WARN] Could not sync with RRM Monitor. Check RrmApiUrl and Location in ring-config.json." -ForegroundColor Yellow
                     }
                 } else {
                     Write-Host "[WARN] Register-PeerWithRrmApi not available. Update PeerManagement.ps1." -ForegroundColor Yellow
