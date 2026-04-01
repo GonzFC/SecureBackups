@@ -618,6 +618,21 @@ function New-UnifiedBackupJob {
         Write-Host "`nJob saved but scheduled task creation failed!" -ForegroundColor Red
     }
 
+    # Sync with RRM API - register peer + updated job list
+    if (Get-Command 'Register-PeerWithRrmApi' -ErrorAction SilentlyContinue) {
+        Write-Host "Syncing with RRM Monitor..." -ForegroundColor Gray -NoNewline
+        try {
+            $rrmResult = Register-PeerWithRrmApi
+            if ($rrmResult) {
+                Write-Host " [OK]" -ForegroundColor Green
+            } else {
+                Write-Host " [SKIP - not configured]" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host " [SKIP - $($_.Exception.Message)]" -ForegroundColor Yellow
+        }
+    }
+
     Read-Host "`nPress Enter to continue"
 }
 

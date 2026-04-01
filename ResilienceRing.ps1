@@ -628,9 +628,9 @@ if (Get-Command 'Invoke-JobsValidation' -ErrorAction SilentlyContinue) {
     }
 }
 
-# Auto-register with RRM if no API key exists yet
+# Auto-register with RRM if no API key exists yet (only when location is already defined)
 $ringConfig = if (Get-Command 'Get-RingConfig' -ErrorAction SilentlyContinue) { Get-RingConfig } else { $null }
-if ($ringConfig -and -not $ringConfig.RrmApiKey) {
+if ($ringConfig -and -not $ringConfig.RrmApiKey -and $ringConfig.Location) {
     if (Get-Command 'Register-PeerWithRrmApi' -ErrorAction SilentlyContinue) {
         Write-Host "Registering with RRM Monitor..." -ForegroundColor Gray -NoNewline
         try {
