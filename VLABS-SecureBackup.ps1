@@ -2141,6 +2141,157 @@ function Test-DestinationCredentials {
 
 #endregion
 
+#region Uninstall
+
+function Invoke-Uninstall {
+    <#
+    .SYNOPSIS
+        Removes all Resilience Ring configuration from this machine.
+        Tailscale is intentionally NOT removed.
+    #>
+    Clear-Host
+    Write-Host "`n===============================================" -ForegroundColor Red
+    Write-Host "       UNINSTALL RESILIENCE RING" -ForegroundColor Red
+    Write-Host "===============================================`n" -ForegroundColor Red
+
+    Write-Host "This will permanently remove:" -ForegroundColor Yellow
+    Write-Host "  - All backup job scheduled tasks" -ForegroundColor White
+    Write-Host "  - SMB share (RR_Backups)" -ForegroundColor White
+    Write-Host "  - Service account (RR_Service)" -ForegroundColor White
+    Write-Host "  - All configuration (jobs, destinations, ring config)" -ForegroundColor White
+    Write-Host "  - Start Menu shortcut" -ForegroundColor White
+    Write-Host "  - Application files (C:\VLABS_ResilienceRing\)" -ForegroundColor White
+    Write-Host ""
+    Write-Host "The following will NOT be removed:" -ForegroundColor Green
+    Write-Host "  - Tailscale (stays installed and connected)" -ForegroundColor White
+    Write-Host "  - Your actual backup data files" -ForegroundColor White
+    Write-Host ""
+    Write-Host "WARNING: This action cannot be undone!" -ForegroundColor Red
+    Write-Host ""
+
+    $confirm = Read-Host "Type UNINSTALL to confirm, or press Enter to cancel"
+    if ($confirm -ne "UNINSTALL") {
+        Write-Host "`nUninstall cancelled." -ForegroundColor Yellow
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    Write-Host ""
+    Write-Host "Starting uninstall..." -ForegroundColor Cyan
+    Write-Host ""
+
+    # Step 1: Remove scheduled tasks
+    Write-Host "[ 1/6 ] Removing scheduled tasks..." -ForegroundColor Yellow
+    $jobs = @(Get-Jobs)
+    $taskCount = 0
+    foreach ($job in $jobs) {
+        if ($job.TaskName) {
+            $task = Get-ScheduledTask -TaskName $job.TaskName -ErrorAction SilentlyContinue
+            if ($task) {
+                Unregister-ScheduledTask -TaskName $job.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+                Write-Host "       Removed task: $($job.TaskName)" -ForegroundColor Gray
+                $taskCount++
+            }
+        }
+    }
+    if ($taskCount -eq 0) {
+        Write-Host "       No scheduled tasks found." -ForegroundColor Gray
+    } else {
+        Write-Host "       Removed $taskCount task(s)." -ForegroundColor Green
+    }
+
+    # Step 2: Remove SMB share
+    Write-Host "[ 2/6 ] Removing SMB share (RR_Backups)..." -ForegroundColor Yellow
+    $share = Get-SmbShare -Name "RR_Backups" -ErrorAction SilentlyContinue
+    if ($share) {
+        Remove-SmbShare -Name "RR_Backups" -Force -ErrorAction SilentlyContinue
+        Write-Host "       Share removed." -ForegroundColor Green
+    } else {
+        Write-Host "       Share not found (already removed)." -ForegroundColor Gray
+    }
+
+    # Step 3: Remove service account
+    Write-Host "[ 3/6 ] Removing service account (RR_Service)..." -ForegroundColor Yellow
+    $user = Get-LocalUser -Name "RR_Service" -ErrorAction SilentlyContinue
+    if ($user) {
+        Remove-LocalUser -Name "RR_Service" -ErrorAction SilentlyContinue
+        Write-Host "       Account removed." -ForegroundColor Green
+    } else {
+        Write-Host "       Account not found (already removed)." -ForegroundColor Gray
+    }
+
+    # Step 4: Remove configuration files
+    Write-Host "[ 4/6 ] Removing configuration files..." -ForegroundColor Yellow
+    $configDir = "C:\ProgramData\VLABS_ResilienceRing"
+    $configFiles = @(
+        "ring-config.json", "jobs.json", "jobs-status.json",
+        "destinations.json", "storage-peers.json", "peer-info.json", "debug.log"
+    )
+    foreach ($file in $configFiles) {
+        $path = Join-Path $configDir $file
+        if (Test-Path $path) {
+            Remove-Item $path -Force -ErrorAction SilentlyContinue
+            Write-Host "       Removed: $file" -ForegroundColor Gray
+        }
+    }
+
+    # Ask about logs
+    $logsDir = Join-Path $configDir "Logs"
+    if (Test-Path $logsDir) {
+        Write-Host ""
+        $keepLogs = Read-Host "       Keep log files? (yes/no)"
+        if ($keepLogs -ne "yes") {
+            Remove-Item $logsDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host "       Logs removed." -ForegroundColor Gray
+        } else {
+            Write-Host "       Logs kept at: $logsDir" -ForegroundColor Gray
+        }
+    }
+
+    # Remove config dir if now empty
+    if ((Test-Path $configDir)) {
+        $remaining = Get-ChildItem $configDir -Recurse -ErrorAction SilentlyContinue
+        if (-not $remaining) {
+            Remove-Item $configDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Write-Host "       Configuration files removed." -ForegroundColor Green
+
+    # Step 5: Remove Start Menu shortcut
+    Write-Host "[ 5/6 ] Removing Start Menu shortcut..." -ForegroundColor Yellow
+    $shortcut = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Resilience Ring.lnk"
+    if (Test-Path $shortcut) {
+        Remove-Item $shortcut -Force -ErrorAction SilentlyContinue
+        Write-Host "       Shortcut removed." -ForegroundColor Green
+    } else {
+        Write-Host "       Shortcut not found." -ForegroundColor Gray
+    }
+
+    # Step 6: Schedule removal of application directory
+    # (cannot delete while running from it — schedule for a few seconds after exit)
+    Write-Host "[ 6/6 ] Scheduling removal of application directory..." -ForegroundColor Yellow
+    $appDir = "C:\VLABS_ResilienceRing"
+    if (Test-Path $appDir) {
+        Start-Process "cmd" -ArgumentList "/c timeout /t 4 /nobreak >nul && rmdir /s /q `"$appDir`"" -WindowStyle Hidden
+        Write-Host "       Scheduled for removal: $appDir" -ForegroundColor Green
+    } else {
+        Write-Host "       App directory not found." -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    Write-Host "===============================================" -ForegroundColor Green
+    Write-Host "   Resilience Ring has been uninstalled." -ForegroundColor Green
+    Write-Host "   Tailscale remains installed and active." -ForegroundColor Green
+    Write-Host "===============================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "This window will close in 5 seconds..." -ForegroundColor Gray
+    Write-Log "Resilience Ring uninstalled by user" -Level INFO
+    Start-Sleep -Seconds 5
+    exit 0
+}
+
+#endregion
+
 #region Main Menu
 
 function Show-MainMenu {
@@ -2159,6 +2310,8 @@ function Show-MainMenu {
     Write-Host " 8. Delete Backup Job" -ForegroundColor White
     Write-Host " 9. View Backup Status & History" -ForegroundColor White
     Write-Host " 0. Exit" -ForegroundColor White
+    Write-Host ""
+    Write-Host " U. Uninstall Resilience Ring" -ForegroundColor DarkRed
 
     Write-Host "`n===============================================" -ForegroundColor Cyan
 }
@@ -2168,7 +2321,7 @@ function Start-MainLoop {
         Show-MainMenu
         $choice = Read-Host "`nEnter your choice"
 
-        switch ($choice) {
+        switch ($choice.ToUpper()) {
             "1" { New-BackupDestination }
             "2" { New-BackupJob }
             "3" { Invoke-BackupJobNow }
@@ -2183,6 +2336,7 @@ function Start-MainLoop {
                 Write-Log "Application closed" -Level INFO
                 exit 0
             }
+            "U" { Invoke-Uninstall }
             default {
                 Write-Host "`nInvalid choice! Please try again." -ForegroundColor Red
                 Start-Sleep -Seconds 2
