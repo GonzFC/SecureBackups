@@ -943,8 +943,19 @@ function Register-PeerWithRrmApi {
     }
     catch {
         # Non-fatal  -  peer still works without the API
-        Write-RRDebug "RRM API registration failed: $_"
-        Write-Warning "Could not register with RRM API. Peer works normally but won't appear in the monitor."
+        $errMsg = $_.Exception.Message
+        # Try to read the HTTP response body for more detail (e.g. "Project not found")
+        try {
+            $resp = $_.Exception.Response
+            if ($resp) {
+                $stream = $resp.GetResponseStream()
+                $reader = New-Object System.IO.StreamReader($stream)
+                $body   = $reader.ReadToEnd()
+                if ($body) { $errMsg = $body.Trim('"') }
+            }
+        } catch {}
+        Write-RRDebug "RRM API registration failed: $errMsg"
+        Write-Warning "Could not register with RRM API: $errMsg"
         return $null
     }
 }
@@ -2647,64 +2658,15 @@ function Invoke-JobsValidation {
             }
         }
         
-        # AUTO-FIX: Jobs without valid destination configuration
-        # This is NOT a user responsibility - app must fix silently
-        $hasValidDestination = ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) -or 
+        # Check: Jobs without valid destination configuration
+        # NOTE: We do NOT attempt network-based auto-fix here (startup must be fast).
+        #       Network discovery happens only when the user explicitly runs 'D'.
+        $hasValidDestination = ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) -or
                                ($job.DestinationPath -and $job.DestinationPath -ne '')
-        
+
         if (-not $hasValidDestination) {
-            Write-RRDebug "Job '$($job.JobName)' has no valid destination - attempting auto-fix"
-            
-            $autoFixSuccess = $false
-            
-            # Try to auto-assign peer destinations
-            try {
-                $config = Get-RingConfig
-                if ($config -and $config.CustomerCode) {
-                    # Get available storage peers
-                    $storagePeers = @(Get-AvailableStoragePeers)
-                    if ($storagePeers -and $storagePeers.Count -gt 0) {
-                        # Select minimum 2 peers (or all if fewer available)
-                        $peersToUse = $storagePeers | Select-Object -First ([Math]::Min(2, $storagePeers.Count))
-                        
-                        $peerDestinations = @()
-                        foreach ($peer in $peersToUse) {
-                            $peerDestinations += @{
-                                Hostname = $peer.Hostname
-                                TailscaleIP = $peer.TailscaleIP
-                                Location = $peer.Location
-                                BasePath = "\\$($peer.TailscaleIP)\RR_Backups"
-                            }
-                        }
-                        
-                        $jobs[$i] | Add-Member -NotePropertyName 'PeerDestinations' -NotePropertyValue $peerDestinations -Force
-                        
-                        # Ensure retention values exist
-                        if ($null -eq $job.RetentionMonthly) {
-                            $jobs[$i] | Add-Member -NotePropertyName 'RetentionMonthly' -NotePropertyValue 1 -Force
-                        }
-                        if ($null -eq $job.RetentionWeekly) {
-                            $jobs[$i] | Add-Member -NotePropertyName 'RetentionWeekly' -NotePropertyValue 2 -Force
-                        }
-                        if ($null -eq $job.RetentionRecent) {
-                            $jobs[$i] | Add-Member -NotePropertyName 'RetentionRecent' -NotePropertyValue 3 -Force
-                        }
-                        
-                        $modified = $true
-                        $result.JobsRepaired++  # Silent repair, not shown to user
-                        $autoFixSuccess = $true
-                        Write-RRDebug "Auto-fixed job '$($job.JobName)' with $($peerDestinations.Count) peer(s)"
-                    }
-                }
-            }
-            catch {
-                Write-RRDebug "Could not auto-fix job '$($job.JobName)': $_"
-            }
-            
-            # Only report as issue if auto-fix failed and no storage peers available
-            if (-not $autoFixSuccess) {
-                $result.Issues += "Job '$($job.JobName)' has no destinations (run 'D' to discover peers first)"
-            }
+            $result.Issues += "Job '$($job.JobName)' has no destinations (run 'D' to discover peers)"
+            Write-RRDebug "Job '$($job.JobName)' has no valid destination"
         }
         
         # Note: LastRun, LastStatus, LastDurationSeconds, LastSizeBytes are now stored
