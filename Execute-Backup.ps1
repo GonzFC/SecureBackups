@@ -95,9 +95,12 @@ function Save-Jobs {
     param($Jobs)
     try {
         # Strip transaction data properties before saving master data
-        $masterDataProperties = @('JobName', 'BackupType', 'BackupObject', 'TargetPeers', 
-                                   'Schedule', 'StartHour', 'Retention', 'RetentionMonthly', 
-                                   'RetentionWeekly', 'RetentionRecent', 'TaskName', 'Enabled')
+        $masterDataProperties = @('JobName', 'AppName', 'AppNameClean', 'BackupType', 'BackupObject',
+                                   'SourceLocation', 'CustomerCode', 'TargetPeers', 'PeerDestinations',
+                                   'Schedule', 'Frequency', 'StartHour', 'Retention', 'RetentionMonthly',
+                                   'RetentionWeekly', 'RetentionRecent', 'TaskName', 'Enabled',
+                                   'Destination', 'DestinationPath', 'DestinationDomain',
+                                   'DestinationUsername', 'DestinationEncryptedPassword', 'CreatedDate')
         
         $cleanJobs = @()
         foreach ($job in $Jobs) {
@@ -1290,12 +1293,18 @@ function Invoke-BackupJob {
             $success = Invoke-LegacyBackup -Job $job
         }
         else {
-            Write-Log "Job has no valid destination configuration" -Level ERROR
+            Write-Log "Job '$JobName' has no destination configured. Add peer destinations via menu option D (Discover peers) or check job settings." -Level ERROR
+            # Skip heartbeat — no backup was attempted, nothing to report
+            $endTime = Get-Date
+            $durationSeconds = [int]($endTime - $startTime).TotalSeconds
+            Update-JobStatus -JobName $JobName -Status "Failed" -DurationSeconds $durationSeconds -SizeBytes 0
+            Write-Log "=== Backup Job Completed: $JobName - Failed (${durationSeconds}s) ===" -Level ERROR
+            return
         }
-        
+
         $endTime = Get-Date
         $durationSeconds = [int]($endTime - $startTime).TotalSeconds
-        
+
         $finalStatus = if ($success) { "Success" } else { "Failed" }
         Update-JobStatus -JobName $JobName -Status $finalStatus -DurationSeconds $durationSeconds -SizeBytes $sizeBytes
 
