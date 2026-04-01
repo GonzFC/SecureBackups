@@ -912,9 +912,11 @@ function Register-PeerWithRrmApi {
 
         # When a single jobs.json entry covers multiple SQL instances, JobName/BackupType/BackupObject
         # are stored as parallel arrays — expand each into its own API job so the dashboard shows them separately.
-        $jobNames   = if ($job.JobName    -is [array]) { $job.JobName    } else { @($job.JobName) }
-        $jobTypes   = if ($job.BackupType -is [array]) { $job.BackupType } else { @($job.BackupType) }
-        $jobObjects = if ($job.BackupObject -is [array]) { $job.BackupObject } else { @($job.BackupObject) }
+        # PS5.1: use [array] type constraint to prevent pipeline from unwrapping single-element arrays
+        # (without it, @("Community") gets unwrapped to "Community" and [0] returns the char 'C')
+        [array]$jobNames   = if ($job.JobName    -is [array]) { $job.JobName    } else { @($job.JobName) }
+        [array]$jobTypes   = if ($job.BackupType -is [array]) { $job.BackupType } else { @($job.BackupType) }
+        [array]$jobObjects = if ($job.BackupObject -is [array]) { $job.BackupObject } else { @($job.BackupObject) }
 
         for ($i = 0; $i -lt $jobNames.Count; $i++) {
             $jName   = [string]$jobNames[$i]
