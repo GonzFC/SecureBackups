@@ -628,6 +628,26 @@ if (Get-Command 'Invoke-JobsValidation' -ErrorAction SilentlyContinue) {
     }
 }
 
+# Auto-register with RRM if no API key exists yet
+$ringConfig = if (Get-Command 'Get-RingConfig' -ErrorAction SilentlyContinue) { Get-RingConfig } else { $null }
+if ($ringConfig -and -not $ringConfig.RrmApiKey) {
+    if (Get-Command 'Register-PeerWithRrmApi' -ErrorAction SilentlyContinue) {
+        Write-Host "Registering with RRM Monitor..." -ForegroundColor Gray -NoNewline
+        try {
+            $regResult = Register-PeerWithRrmApi -Config $ringConfig
+            if ($regResult) {
+                Write-Host " [OK - peer ID: $($regResult.peerId)]" -ForegroundColor Green
+                # Reload config so Publish-NodeStatus picks up the new key
+                $ringConfig = Get-RingConfig
+            } else {
+                Write-Host " [SKIP - check RrmApiUrl/ProjectId]" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host " [SKIP - $($_.Exception.Message)]" -ForegroundColor Yellow
+        }
+    }
+}
+
 # Publish node status for RRM
 if (Get-Command 'Publish-NodeStatus' -ErrorAction SilentlyContinue) {
     Write-Host "Publishing node status..." -ForegroundColor Gray -NoNewline
