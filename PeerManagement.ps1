@@ -894,11 +894,12 @@ function Register-PeerWithRrmApi {
     foreach ($job in $localJobs) {
         $destinations = New-Object System.Collections.Generic.List[object]
         foreach ($dest in @($job.PeerDestinations)) {
+            if (-not $dest.Hostname) { continue }  # skip incomplete destinations
             $destinations.Add(@{
                 hostname    = $dest.Hostname
                 tailscaleIp = $dest.TailscaleIP
                 location    = $dest.Location
-                basePath    = $dest.BasePath
+                basePath    = if ($dest.BasePath) { $dest.BasePath } else { '' }
             })
         }
 
