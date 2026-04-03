@@ -1064,19 +1064,30 @@ function Add-StoragePeer {
     
     Write-Host ""
     
-    # Step 2: Customer Codename
-    Write-Host "STEP 2: Customer Codename" -ForegroundColor Yellow
-    Write-Host "--------------------------" -ForegroundColor Yellow
-    Write-Host "Enter a 2-6 character code to identify this customer/organization."
-    Write-Host "Examples: vlabs, mmi, msk, acme"
-    Write-Host "`nCodename: " -NoNewline -ForegroundColor White
-    $codename = (Read-Host).ToLower().Trim()
-    
-    if ($codename.Length -lt 2 -or $codename.Length -gt 6 -or $codename -notmatch '^[a-z0-9]+$') {
-        Write-Host "[ERROR] Codename must be 2-6 lowercase letters/numbers only" -ForegroundColor Red
+    # Step 2: Customer Codename(s)
+    Write-Host "STEP 2: Customer Codename(s)" -ForegroundColor Yellow
+    Write-Host "-----------------------------" -ForegroundColor Yellow
+    Write-Host "Enter one or more 2-6 character codes to identify this customer/organization."
+    Write-Host "Separate multiple codes with commas."
+    Write-Host "Examples: vlabs     (single)     vlabs,mmi     (multiple)"
+    Write-Host "`nCodename(s): " -NoNewline -ForegroundColor White
+    $codenameInput = (Read-Host).ToLower().Trim()
+
+    # Parse and validate each code
+    $allCodes = @($codenameInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    if ($allCodes.Count -eq 0) {
+        Write-Host "[ERROR] At least one codename is required" -ForegroundColor Red
         Read-Host "`nPress Enter to return"
         return
     }
+    $invalidCode = $allCodes | Where-Object { $_.Length -lt 2 -or $_.Length -gt 6 -or $_ -notmatch '^[a-z0-9]+$' } | Select-Object -First 1
+    if ($invalidCode) {
+        Write-Host "[ERROR] Invalid code '$invalidCode' — each code must be 2-6 lowercase letters/numbers only" -ForegroundColor Red
+        Read-Host "`nPress Enter to return"
+        return
+    }
+    # Primary code drives the service account password and default Tailscale tag
+    $codename = $allCodes[0]
     
     Write-Host ""
     
@@ -1305,6 +1316,7 @@ function Add-StoragePeer {
         WindowsHostname = $env:COMPUTERNAME
         TailscaleIP = $tsStatus.Self.TailscaleIPs[0]
         CustomerCode = $codename
+        CustomerCodes = $allCodes
         TailscaleTag = $tailscaleTag
         TailscaleMode = 'AlwaysOn'
         Location = $locationName
@@ -1327,6 +1339,7 @@ function Add-StoragePeer {
     $peerInfoPath = Join-Path $storagePath "peer-info.json"
     $peerInfo = @{
         CustomerCode = $codename
+        CustomerCodes = $allCodes
         TailscaleTag = $tailscaleTag
         Location = $locationName
         Hostname = $tailscaleHostname
@@ -1360,7 +1373,8 @@ function Add-StoragePeer {
     Write-Host "Summary:" -ForegroundColor Cyan
     Write-Host "  Tailscale Name: $tailscaleHostname" -ForegroundColor White
     Write-Host "  Tailscale IP:   $($config.TailscaleIP)" -ForegroundColor White
-    Write-Host "  Customer:       $($config.CustomerCode)" -ForegroundColor White
+    $displayCodes = if ($config.CustomerCodes -and $config.CustomerCodes.Count -gt 1) { $config.CustomerCodes -join ', ' } else { $config.CustomerCode }
+    Write-Host "  Customer:       $displayCodes" -ForegroundColor White
     Write-Host "  Tailscale Tag:  $($config.TailscaleTag)" -ForegroundColor White
     Write-Host "  Location:       $locationName" -ForegroundColor White
     Write-Host "  Storage:        $($config.StoragePath)" -ForegroundColor White
@@ -1375,7 +1389,7 @@ function Add-StoragePeer {
     Write-Host "  1. Make sure this machine has the Tailscale tag '$tailscaleTag'" -ForegroundColor White
     Write-Host "     in your Tailscale admin console: https://login.tailscale.com/admin/machines" -ForegroundColor Gray
     Write-Host "  2. Run 'Add Storage Peer' (P) on other machines with the SAME" -ForegroundColor White
-    Write-Host "     Customer Code '$codename' to join this ring." -ForegroundColor Gray
+    Write-Host "     Customer Code(s) '$($allCodes -join ', ')' to join this ring." -ForegroundColor Gray
 
     # Register with RRM API if configured
     Write-Host ""
@@ -1617,10 +1631,11 @@ function Update-PeerList {
             return $result
         }
 
-        # Derive service password (same algorithm as Get-RingServicePassword)
+        # Derive service password from the PRIMARY code (first in comma-separated list)
+        $primaryCode = ($CustomerCode -split ',')[0].Trim()
         $salt     = "ResilienceRing2026!"
         $sha256   = [System.Security.Cryptography.SHA256]::Create()
-        $bytes    = [System.Text.Encoding]::UTF8.GetBytes("$CustomerCode$salt")
+        $bytes    = [System.Text.Encoding]::UTF8.GetBytes("$primaryCode$salt")
         $hash     = $sha256.ComputeHash($bytes)
         $password = ([BitConverter]::ToString($hash) -replace '-', '').Substring(0, 12) + "Rr1!"
 
@@ -1662,7 +1677,16 @@ function Update-PeerList {
             return $result
         }
 
-        if ($result.PeerInfo.CustomerCode -ne $CustomerCode) {
+        # Accept if there is any code overlap between local and remote
+        $localCodes  = @($CustomerCode -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+        $remoteCodes = @()
+        if ($result.PeerInfo.CustomerCodes) {
+            $remoteCodes = @($result.PeerInfo.CustomerCodes)
+        } elseif ($result.PeerInfo.CustomerCode) {
+            $remoteCodes = @($result.PeerInfo.CustomerCode)
+        }
+        $hasMatch = ($localCodes | Where-Object { $remoteCodes -contains $_ }).Count -gt 0
+        if (-not $hasMatch) {
             $result.Status = 'mismatch'
             $result.Reason  = "Different customer code: $($result.PeerInfo.CustomerCode)"
             return $result
@@ -1683,7 +1707,9 @@ function Update-PeerList {
         $ps.RunspacePool = $runspacePool
         $ps.AddScript($scanScript)          | Out-Null
         $ps.AddParameter('Peer',          $peer)                  | Out-Null
-        $ps.AddParameter('CustomerCode',  $config.CustomerCode)   | Out-Null
+        # Pass all codes as comma-separated; scan script uses first for password, all for validation
+        $allCodesStr = if ($config.CustomerCodes) { $config.CustomerCodes -join ',' } else { $config.CustomerCode }
+        $ps.AddParameter('CustomerCode',  $allCodesStr)   | Out-Null
         $ps.AddParameter('SelfIP',        $config.TailscaleIP)    | Out-Null
         $jobs.Add([PSCustomObject]@{ PS = $ps; Handle = $ps.BeginInvoke(); Peer = $peer })
     }
