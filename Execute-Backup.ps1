@@ -590,20 +590,38 @@ function Restore-TailscaleAfterBackup {
 function Connect-ToPeer {
     param(
         [string]$TailscaleIP,
-        [string]$CustomerCode
+        [string]$CustomerCode,
+        [int]$TimeoutSeconds = 30
     )
-    
+
     $sharePath = "\\$TailscaleIP\RR_Backups"
-    
+
     # Check if already connected (use -SimpleMatch to avoid regex issues with backslashes)
     $existing = net use 2>$null | Select-String -SimpleMatch $sharePath
     if ($existing) { return $true }
-    
+
     # Get service account password
     $password = Get-RingServicePassword -CustomerCode $CustomerCode
-    
-    $result = net use $sharePath /user:RR_Service $password 2>&1
-    return ($LASTEXITCODE -eq 0)
+
+    # Run net use in a background job to enforce a timeout.
+    # Without this, net use can hang indefinitely when the peer is unreachable.
+    $connectJob = Start-Job -ScriptBlock {
+        param($path, $pass)
+        net use $path /user:RR_Service $pass 2>&1 | Out-Null
+        return $LASTEXITCODE
+    } -ArgumentList $sharePath, $password
+
+    $finished = Wait-Job -Job $connectJob -Timeout $TimeoutSeconds
+    if (-not $finished) {
+        Stop-Job  -Job $connectJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $connectJob -Force -ErrorAction SilentlyContinue
+        net use $sharePath /delete 2>$null | Out-Null
+        return $false
+    }
+
+    $exitCode = Receive-Job -Job $connectJob
+    Remove-Job -Job $connectJob -Force -ErrorAction SilentlyContinue
+    return ($exitCode -eq 0)
 }
 
 function Disconnect-FromPeer {
@@ -1242,47 +1260,50 @@ function Send-RrmHeartbeat {
 
 function Invoke-BackupJob {
     param([string]$JobName)
-    
+
     $startTime = Get-Date
     Write-Log "=== Backup Job Started: $JobName ===" -Level INFO
-    
+
     $tailscaleSession = Ensure-TailscaleForBackup
     if (-not $tailscaleSession.Ready) {
         Write-Log "Cannot start backup because Tailscale is unavailable: $($tailscaleSession.Reason)" -Level ERROR
+        Update-JobStatus -JobName $JobName -Status "Failed" -DurationSeconds 0 -SizeBytes 0
         return $false
     }
-    
+
+    # These are set inside try/catch so the finally block can always write the final status.
+    $finalStatus    = 'Failed'
+    $durationSeconds = 0
+    $sizeBytes       = 0
+    $success         = $false
+
     try {
         $jobs = Get-Jobs
         $job = $jobs | Where-Object { $_.JobName -eq $JobName }
-        
+
         if (-not $job) {
             Write-Log "Job not found: $JobName" -Level ERROR
             return $false
         }
-        
+
         if ($job.Enabled -eq $false) {
             Write-Log "Job is disabled" -Level WARNING
             return $false
         }
-        
+
         Update-JobStatus -JobName $JobName -Status "Running"
-        
-        # Determine job type and execute
-        $success = $false
-        $sizeBytes = 0
-        
+
         if ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) {
             # New unified backup with retention
             $success = Invoke-UnifiedBackup -Job $job
-            
+
             # Calculate source size
             try {
                 if ($job.BackupType -eq 'F') {
                     $sizeBytes = (Get-Item $job.BackupObject -ErrorAction SilentlyContinue).Length
                 }
                 else {
-                    $sizeBytes = (Get-ChildItem $job.BackupObject -Recurse -File -ErrorAction SilentlyContinue | 
+                    $sizeBytes = (Get-ChildItem $job.BackupObject -Recurse -File -ErrorAction SilentlyContinue |
                                   Measure-Object -Property Length -Sum).Sum
                 }
             }
@@ -1294,19 +1315,11 @@ function Invoke-BackupJob {
         }
         else {
             Write-Log "Job '$JobName' has no destination configured. Add peer destinations via menu option D (Discover peers) or check job settings." -Level ERROR
-            # Skip heartbeat — no backup was attempted, nothing to report
-            $endTime = Get-Date
-            $durationSeconds = [int]($endTime - $startTime).TotalSeconds
-            Update-JobStatus -JobName $JobName -Status "Failed" -DurationSeconds $durationSeconds -SizeBytes 0
-            Write-Log "=== Backup Job Completed: $JobName - Failed (${durationSeconds}s) ===" -Level ERROR
-            return
+            return $false
         }
 
-        $endTime = Get-Date
-        $durationSeconds = [int]($endTime - $startTime).TotalSeconds
-
-        $finalStatus = if ($success) { "Success" } else { "Failed" }
-        Update-JobStatus -JobName $JobName -Status $finalStatus -DurationSeconds $durationSeconds -SizeBytes $sizeBytes
+        $durationSeconds = [int]((Get-Date) - $startTime).TotalSeconds
+        $finalStatus     = if ($success) { "Success" } else { "Failed" }
 
         # Send heartbeat to RRM API
         $errorMsg = if (-not $success) { "Backup failed  -  check log for details" } else { $null }
@@ -1325,12 +1338,18 @@ function Invoke-BackupJob {
 
         # Publish status to share for RRM
         Publish-NodeStatus
-        
-        Write-Log "=== Backup Job Completed: $JobName - $finalStatus (${durationSeconds}s) ===" -Level $(if($success){'SUCCESS'}else{'ERROR'})
-        
+
         return $success
     }
+    catch {
+        $durationSeconds = [int]((Get-Date) - $startTime).TotalSeconds
+        $finalStatus     = 'Failed'
+        Write-Log "Unhandled error in backup job '$JobName': $_" -Level ERROR
+    }
     finally {
+        # Always write the final status — even if the job crashed or was interrupted.
+        Update-JobStatus -JobName $JobName -Status $finalStatus -DurationSeconds $durationSeconds -SizeBytes $sizeBytes
+        Write-Log "=== Backup Job Completed: $JobName - $finalStatus (${durationSeconds}s) ===" -Level $(if ($finalStatus -eq 'Success') { 'SUCCESS' } else { 'ERROR' })
         Restore-TailscaleAfterBackup -Session $tailscaleSession
     }
 }
