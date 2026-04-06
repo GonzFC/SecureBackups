@@ -1082,7 +1082,7 @@ function Add-StoragePeer {
     }
     $invalidCode = $allCodes | Where-Object { $_.Length -lt 2 -or $_.Length -gt 6 -or $_ -notmatch '^[a-z0-9]+$' } | Select-Object -First 1
     if ($invalidCode) {
-        Write-Host "[ERROR] Invalid code '$invalidCode' — each code must be 2-6 lowercase letters/numbers only" -ForegroundColor Red
+        Write-Host "[ERROR] Invalid code '$invalidCode' - each code must be 2-6 lowercase letters/numbers only" -ForegroundColor Red
         Read-Host "`nPress Enter to return"
         return
     }

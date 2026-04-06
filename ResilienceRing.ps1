@@ -467,7 +467,7 @@ else {
 $peerScript = Join-Path $PSScriptRoot "PeerManagement.ps1"
 if (Test-Path $peerScript) {
     try { . $peerScript; Write-Host "[OK] Peer management loaded" -ForegroundColor Green }
-    catch { Write-Host "[WARN] Peer management not loaded: $($_.Exception.Message)" -ForegroundColor Yellow }
+    catch { Write-Host "[WARN] Peer management not loaded: $($_.Exception.Message)`n$($_.ScriptStackTrace)" -ForegroundColor Yellow }
 }
 
 # Load Backup Job functions
