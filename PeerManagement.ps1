@@ -1453,49 +1453,90 @@ function Show-StoragePeers {
         return
     }
     
-    Write-Host "Checking $($peers.Count) peers..." -ForegroundColor Gray
+    Write-Host "Checking $($peers.Count) peers in parallel..." -ForegroundColor Gray
     Write-Host ""
-    
-    $availablePeers = @()
-    $unavailablePeers = @()
-    
+
+    # Probe script executed in each runspace — no external function dependencies
+    $probeScript = {
+        param($Peer, $CustomerCode)
+
+        $result = [PSCustomObject]@{
+            Hostname    = $Peer.Hostname
+            Location    = $Peer.Location
+            TailscaleIP = $Peer.TailscaleIP
+            QuotaGB     = $Peer.QuotaGB
+            PingMs      = -1
+            ShareOk     = $false
+            Reason      = 'Ping failed'
+        }
+
+        # Ping (2 attempts, 2s each)
+        $pinger = New-Object System.Net.NetworkInformation.Ping
+        for ($i = 1; $i -le 2; $i++) {
+            try {
+                $r = $pinger.Send($Peer.TailscaleIP, 2000)
+                if ($r.Status -eq [System.Net.NetworkInformation.IPStatus]::Success) {
+                    $result.PingMs = $r.RoundtripTime
+                    break
+                }
+            } catch {}
+            if ($i -lt 2) { Start-Sleep -Milliseconds 500 }
+        }
+
+        if ($result.PingMs -lt 0) { return $result }
+
+        # SMB share check
+        $salt     = "ResilienceRing2026!"
+        $sha256   = [System.Security.Cryptography.SHA256]::Create()
+        $bytes    = [System.Text.Encoding]::UTF8.GetBytes("$CustomerCode$salt")
+        $hash     = $sha256.ComputeHash($bytes)
+        $password = ([BitConverter]::ToString($hash) -replace '-', '').Substring(0, 12) + "Rr1!"
+
+        $sharePath = "\\$($Peer.TailscaleIP)\RR_Backups"
+        net use $sharePath /delete 2>$null | Out-Null
+        net use $sharePath /user:RR_Service $password 2>&1 | Out-Null
+
+        if ($LASTEXITCODE -eq 0) {
+            $result.ShareOk = (Test-Path $sharePath -ErrorAction SilentlyContinue)
+            net use $sharePath /delete 2>$null | Out-Null
+            $result.Reason  = if ($result.ShareOk) { 'ok' } else { 'Share not accessible' }
+        } else {
+            $result.Reason = 'Share not accessible'
+        }
+
+        return $result
+    }
+
+    # Launch all runspaces in parallel (max 15 concurrent)
+    $runspacePool = [RunspaceFactory]::CreateRunspacePool(1, 15)
+    $runspacePool.Open()
+    $jobs = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    $primaryCode = ($config.CustomerCode -split ',')[0].Trim()
     foreach ($peer in $peers) {
-        Write-Host "  Testing $($peer.Hostname)..." -NoNewline -ForegroundColor Gray
-        
-        # Test 1: Ping (2 attempts)
-        $pingResult = Test-PeerPing -TailscaleIP $peer.TailscaleIP
-        
-        if (-not $pingResult.Success) {
-            Write-Host " [PING FAILED]" -ForegroundColor Red
-            $unavailablePeers += [PSCustomObject]@{
-                Hostname = $peer.Hostname
-                TailscaleIP = $peer.TailscaleIP
-                Reason = "Ping failed"
-            }
-            continue
-        }
-        
-        # Test 2: SMB Share access
-        $shareOk = Test-PeerSmbShare -TailscaleIP $peer.TailscaleIP
-        
-        if (-not $shareOk) {
-            Write-Host " [SHARE NOT ACCESSIBLE]" -ForegroundColor Yellow
-            $unavailablePeers += [PSCustomObject]@{
-                Hostname = $peer.Hostname
-                TailscaleIP = $peer.TailscaleIP
-                Reason = "Share not accessible"
-                PingMs = $pingResult.PingMs
-            }
-            continue
-        }
-        
-        Write-Host " [OK - $($pingResult.PingMs)ms]" -ForegroundColor Green
-        
-        $availablePeers += [PSCustomObject]@{
-            Hostname = $peer.Hostname
-            TailscaleIP = $peer.TailscaleIP
-            PingMs = $pingResult.PingMs
-            QuotaGB = $peer.QuotaGB
+        $ps = [PowerShell]::Create()
+        $ps.RunspacePool = $runspacePool
+        $ps.AddScript($probeScript)             | Out-Null
+        $ps.AddParameter('Peer',         $peer) | Out-Null
+        $ps.AddParameter('CustomerCode', $primaryCode) | Out-Null
+        $jobs.Add([PSCustomObject]@{ PS = $ps; Handle = $ps.BeginInvoke() })
+    }
+
+    # Collect results
+    $results = foreach ($job in $jobs) {
+        $job.PS.EndInvoke($job.Handle)
+        $job.PS.Dispose()
+    }
+    $runspacePool.Close()
+
+    $availablePeers   = @()
+    $unavailablePeers = @()
+
+    foreach ($r in $results) {
+        if ($r.Reason -eq 'ok') {
+            $availablePeers += $r
+        } else {
+            $unavailablePeers += $r
         }
     }
     
