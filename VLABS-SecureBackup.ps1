@@ -1572,6 +1572,7 @@ function Edit-BackupJob {
     Write-Host "  2. Schedule (frequency and start hour)"
     Write-Host "  3. Enable/Disable job"
     Write-Host "  4. Source path"
+    Write-Host "  5. Destination peers"
     Write-Host "  0. Cancel"
 
     $choice = Read-Host "`nEnter choice"
@@ -1696,6 +1697,94 @@ function Edit-BackupJob {
                 }
             }
         }
+        "5" {
+            # Manage destination peers
+            $availablePeers = @(Get-StoragePeersList)
+            if ($availablePeers.Count -eq 0) {
+                Write-Host "`nNo peers in local list. Run 'Discover & Update' (D) first." -ForegroundColor Yellow
+            }
+            else {
+                $currentDestinations = if ($jobs[$index].PeerDestinations) { @($jobs[$index].PeerDestinations) } else { @() }
+
+                :peerMenu while ($true) {
+                    Clear-Host
+                    Write-Host "`n===============================================" -ForegroundColor Cyan
+                    Write-Host "     DESTINATION PEERS: $($job.JobName)" -ForegroundColor Cyan
+                    Write-Host "===============================================`n" -ForegroundColor Cyan
+
+                    Write-Host "Current destinations:" -ForegroundColor Yellow
+                    if ($currentDestinations.Count -eq 0) {
+                        Write-Host "  (none)" -ForegroundColor Gray
+                    }
+                    else {
+                        for ($d = 0; $d -lt $currentDestinations.Count; $d++) {
+                            $dest = $currentDestinations[$d]
+                            $label = if ($dest.Location) { $dest.Location } else { $dest.Hostname }
+                            Write-Host "  [$($d+1)] $label | $($dest.Hostname) | $($dest.TailscaleIP)" -ForegroundColor White
+                        }
+                    }
+
+                    Write-Host ""
+                    Write-Host "Available peers to add:" -ForegroundColor Yellow
+                    $addable = @($availablePeers | Where-Object {
+                        $ip = $_.TailscaleIP
+                        -not ($currentDestinations | Where-Object { $_.TailscaleIP -eq $ip })
+                    })
+                    if ($addable.Count -eq 0) {
+                        Write-Host "  (all known peers are already destinations)" -ForegroundColor Gray
+                    }
+                    else {
+                        for ($a = 0; $a -lt $addable.Count; $a++) {
+                            $p = $addable[$a]
+                            $label = if ($p.Location) { $p.Location } else { $p.Hostname }
+                            Write-Host "  [A$($a+1)] $label | $($p.Hostname) | $($p.TailscaleIP)" -ForegroundColor Cyan
+                        }
+                    }
+
+                    Write-Host ""
+                    Write-Host "  R# - Remove destination (e.g. R1)" -ForegroundColor Gray
+                    Write-Host "  A# - Add peer as destination (e.g. A1)" -ForegroundColor Gray
+                    Write-Host "  0  - Done" -ForegroundColor Gray
+                    Write-Host ""
+                    $peerChoice = (Read-Host "Choice").Trim()
+
+                    if ($peerChoice -eq "0") { break peerMenu }
+
+                    if ($peerChoice -match '^[Rr](\d+)$') {
+                        $rIdx = [int]$Matches[1] - 1
+                        if ($rIdx -ge 0 -and $rIdx -lt $currentDestinations.Count) {
+                            $removed = $currentDestinations[$rIdx]
+                            $label = if ($removed.Location) { $removed.Location } else { $removed.Hostname }
+                            $currentDestinations = @($currentDestinations | Where-Object { $_.TailscaleIP -ne $removed.TailscaleIP })
+                            Write-Host "[OK] Removed: $label" -ForegroundColor Green
+                            Start-Sleep -Milliseconds 600
+                        }
+                        else { Write-Host "Invalid number." -ForegroundColor Red; Start-Sleep -Milliseconds 600 }
+                    }
+                    elseif ($peerChoice -match '^[Aa](\d+)$') {
+                        $aIdx = [int]$Matches[1] - 1
+                        if ($aIdx -ge 0 -and $aIdx -lt $addable.Count) {
+                            $toAdd = $addable[$aIdx]
+                            $currentDestinations += [PSCustomObject]@{
+                                Hostname    = $toAdd.Hostname
+                                TailscaleIP = $toAdd.TailscaleIP
+                                Location    = $toAdd.Location
+                                CustomerCode = $toAdd.CustomerCode
+                                BasePath    = $toAdd.StoragePath
+                            }
+                            $label = if ($toAdd.Location) { $toAdd.Location } else { $toAdd.Hostname }
+                            Write-Host "[OK] Added: $label" -ForegroundColor Green
+                            Start-Sleep -Milliseconds 600
+                        }
+                        else { Write-Host "Invalid number." -ForegroundColor Red; Start-Sleep -Milliseconds 600 }
+                    }
+                    else { Write-Host "Invalid choice." -ForegroundColor Red; Start-Sleep -Milliseconds 600 }
+                }
+
+                $jobs[$index].PeerDestinations = $currentDestinations
+                Write-Host "`nDestination peers updated!" -ForegroundColor Green
+            }
+        }
         "0" {
             return
         }
@@ -1704,7 +1793,7 @@ function Edit-BackupJob {
         }
     }
 
-    if ($choice -in @("1", "2", "3", "4")) {
+    if ($choice -in @("1", "2", "3", "4", "5")) {
         if (Save-Jobs -Jobs $jobs) {
             Write-Log "Updated job: $($job.JobName)" -Level SUCCESS
             
