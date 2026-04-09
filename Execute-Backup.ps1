@@ -1183,7 +1183,7 @@ function Send-RrmHeartbeat {
     }
 
     # Use default URL for peers not yet configured with RRM
-    $rrmUrl = if ($config.RrmApiUrl) { $config.RrmApiUrl } else { 'https://api-test.mmi.lat/resilience-ring' }
+    $rrmUrl = if ($config.RrmApiUrl) { $config.RrmApiUrl } else { 'https://mercury.velociraptor-hoki.ts.net' }
 
     # If no ApiKey, attempt registration first so we can send heartbeats
     if (-not $config.RrmApiKey) {
