@@ -10,7 +10,9 @@
 
 param(
     [Parameter(Mandatory=$true)]
-    [string]$JobName
+    [string]$JobName,
+
+    [switch]$SkipUpdateCheck
 )
 
 # Configuration - Data in ProgramData (separate from git install directory)
@@ -18,6 +20,14 @@ $script:ConfigPath = "C:\ProgramData\VLABS_ResilienceRing"
 $script:JobsFile = Join-Path $ConfigPath "jobs.json"           # Master data (config)
 $script:JobsStatusFile = Join-Path $ConfigPath "jobs-status.json"  # Transaction data (run history)
 $script:LogPath = Join-Path $ConfigPath "Logs"
+
+# Repo constants (for auto-update)
+$script:RepoOwner  = 'GonzFC'
+$script:RepoName   = 'SecureBackups'
+$script:RepoBranch = 'main'
+$script:InstallPath = $PSScriptRoot
+$script:OldRrmUrl  = 'https://api-test.mmi.lat/resilience-ring'
+$script:NewRrmUrl  = 'https://mercury.velociraptor-hoki.ts.net'
 
 # Load helper modules
 $cryptoUtilsPath = Join-Path $PSScriptRoot "CryptoUtils.ps1"
@@ -50,6 +60,80 @@ function Write-Log {
         'WARNING' { Write-Host $logEntry -ForegroundColor Yellow }
         'SUCCESS' { Write-Host $logEntry -ForegroundColor Green }
         default { Write-Host $logEntry -ForegroundColor Gray }
+    }
+}
+
+#endregion
+
+#region Auto-Update
+
+function Get-LocalRrVersion {
+    $versionFile = Join-Path $script:InstallPath 'version.txt'
+    if (Test-Path $versionFile) { return (Get-Content $versionFile -Raw).Trim() }
+    return $null
+}
+
+function Invoke-AutoUpdate {
+    try {
+        $versionUrl = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/version.txt"
+        $latestVersion = (Invoke-RestMethod -Uri $versionUrl -UseBasicParsing -TimeoutSec 10).Trim()
+        $currentVersion = Get-LocalRrVersion
+
+        if ($null -eq $currentVersion -or [Version]$latestVersion -le [Version]$currentVersion) { return }
+
+        Write-Log "Auto-update: new version available ($currentVersion -> $latestVersion). Updating..." -Level INFO
+
+        $gitAvailable = $null -ne (Get-Command git -ErrorAction SilentlyContinue)
+        $gitRepo = Test-Path (Join-Path $script:InstallPath '.git')
+
+        if ($gitAvailable -and $gitRepo) {
+            Push-Location $script:InstallPath
+            git fetch origin $script:RepoBranch 2>&1 | Out-Null
+            git reset --hard "origin/$script:RepoBranch" 2>&1 | Out-Null
+            Pop-Location
+        } else {
+            $zipUrl   = "https://github.com/$script:RepoOwner/$script:RepoName/archive/refs/heads/$script:RepoBranch.zip"
+            $zipPath  = Join-Path $env:TEMP 'RR_Update.zip'
+            $tmpPath  = Join-Path $env:TEMP 'RR_Update_Extract'
+            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+            if (Test-Path $tmpPath) { Remove-Item $tmpPath -Recurse -Force }
+            Expand-Archive -Path $zipPath -DestinationPath $tmpPath -Force
+            $srcFolder = Get-ChildItem $tmpPath -Directory | Select-Object -First 1
+            Get-ChildItem $srcFolder.FullName -File | ForEach-Object {
+                Copy-Item $_.FullName -Destination (Join-Path $script:InstallPath $_.Name) -Force
+            }
+            Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+            Remove-Item $tmpPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        Get-ChildItem -Path $script:InstallPath -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
+        Write-Log "Auto-update: updated to $latestVersion. Re-launching job..." -Level INFO
+
+        # Re-invoke with updated scripts and skip update check to avoid loop
+        & powershell.exe -NonInteractive -ExecutionPolicy Bypass `
+            -File (Join-Path $script:InstallPath 'Execute-Backup.ps1') `
+            -JobName $JobName -SkipUpdateCheck
+        exit $LASTEXITCODE
+    }
+    catch {
+        Write-Log "Auto-update failed (non-fatal): $_" -Level WARNING
+    }
+}
+
+function Invoke-RrmUrlMigration {
+    # Silently migrate old RRM URL to the new server if still present in config
+    try {
+        $configFile = Join-Path $script:ConfigPath 'ring-config.json'
+        if (-not (Test-Path $configFile)) { return }
+        $config = Get-Content $configFile -Raw | ConvertFrom-Json
+        if ($config.RrmApiUrl -eq $script:OldRrmUrl) {
+            $config.RrmApiUrl = $script:NewRrmUrl
+            $config | ConvertTo-Json -Depth 10 | Set-Content $configFile -Encoding UTF8
+            Write-Log "Auto-migration: RrmApiUrl updated to $script:NewRrmUrl" -Level INFO
+        }
+    }
+    catch {
+        Write-Log "RRM URL migration failed (non-fatal): $_" -Level WARNING
     }
 }
 
@@ -1213,8 +1297,9 @@ function Send-RrmHeartbeat {
     }
 
     $payload = @{
-        hostname = $config.Hostname
-        jobs     = @(
+        hostname  = $config.Hostname
+        rrVersion = (Get-LocalRrVersion)
+        jobs      = @(
             @{
                 name             = $job.JobName
                 backupType       = if ($typeMap.ContainsKey($job.BackupType)) { $typeMap[$job.BackupType] } else { $job.BackupType }
@@ -1359,7 +1444,15 @@ try {
     if (-not (Test-Path $LogPath)) {
         New-Item -Path $LogPath -ItemType Directory -Force | Out-Null
     }
-    
+
+    # Auto-update: check for new version and re-launch if updated
+    if (-not $SkipUpdateCheck) {
+        Invoke-AutoUpdate
+    }
+
+    # Migrate old RRM URL to new server if needed
+    Invoke-RrmUrlMigration
+
     $result = Invoke-BackupJob -JobName $JobName
     exit $(if ($result) { 0 } else { 1 })
 }
