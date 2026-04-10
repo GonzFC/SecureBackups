@@ -110,6 +110,17 @@ function Invoke-AutoUpdate {
         }
 
         Get-ChildItem -Path $script:InstallPath -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
+
+        # Ensure Tailscale DNS is enabled on all peers
+        $tailscaleExe = (Get-Command tailscale -ErrorAction SilentlyContinue)?.Source
+        if (-not $tailscaleExe) {
+            $tailscaleExe = 'C:\Program Files\Tailscale\tailscale.exe'
+        }
+        if (Test-Path $tailscaleExe) {
+            & $tailscaleExe up --accept-dns=true 2>&1 | Out-Null
+            Write-Log "Auto-update: Tailscale DNS enabled" -Level INFO
+        }
+
         Write-Log "Auto-update: updated to $latestVersion. Re-launching job..." -Level INFO
 
         # Re-invoke with updated scripts and skip update check to avoid loop
