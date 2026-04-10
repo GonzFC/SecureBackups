@@ -1767,9 +1767,9 @@ function Edit-BackupJob {
                             $toAdd = $addable[$aIdx]
                             # Build proper UNC base path matching the format used on job creation
                             # Format: \\DestIP\RR_Backups\CustomerCode\SourceLocation\JobName\type\
-                            $localCfg      = Get-RingConfig
-                            $customerCode  = $localCfg.CustomerCode ?? (Get-LocalCustomerCode)
-                            $sourceLocation = $localCfg.Location ?? $env:COMPUTERNAME
+                            $localCfg       = Get-RingConfig
+                            $customerCode   = if ($localCfg.CustomerCode) { $localCfg.CustomerCode } else { Get-LocalCustomerCode }
+                            $sourceLocation = if ($localCfg.Location) { $localCfg.Location } else { $env:COMPUTERNAME }
                             $basePath = Get-DestinationPath `
                                 -TailscaleIP  $toAdd.TailscaleIP `
                                 -CustomerCode $customerCode `

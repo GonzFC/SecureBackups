@@ -112,7 +112,8 @@ function Invoke-AutoUpdate {
         Get-ChildItem -Path $script:InstallPath -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
 
         # Ensure Tailscale DNS is enabled on all peers
-        $tailscaleExe = (Get-Command tailscale -ErrorAction SilentlyContinue)?.Source
+        $tailscaleCmd = Get-Command tailscale -ErrorAction SilentlyContinue
+        $tailscaleExe = if ($tailscaleCmd) { $tailscaleCmd.Source } else { $null }
         if (-not $tailscaleExe) {
             $tailscaleExe = 'C:\Program Files\Tailscale\tailscale.exe'
         }
@@ -967,7 +968,7 @@ function Invoke-BackupToPeer {
     # CustomerCode from job, or fall back to ring-config
     $customerCode = if ($Job.CustomerCode) { $Job.CustomerCode } else { (Get-RingConfig).CustomerCode }
     
-    $peerLabel = if ($Peer.Location) { $Peer.Location } else { $Peer.Hostname ?? $peerIP }
+    $peerLabel = if ($Peer.Location) { $Peer.Location } elseif ($Peer.Hostname) { $Peer.Hostname } else { $peerIP }
     Write-Log "Backing up to peer: $peerLabel ($peerIP) - Type: $RetentionType" -Level INFO
 
     # Connect to peer
@@ -1117,7 +1118,7 @@ function Invoke-UnifiedBackup {
 
     # Backup to each peer
     foreach ($peer in $executionPeers) {
-        $peerLabel  = if ($peer.Location) { $peer.Location } else { $peer.Hostname ?? $peer.TailscaleIP }
+        $peerLabel  = if ($peer.Location) { $peer.Location } elseif ($peer.Hostname) { $peer.Hostname } else { $peer.TailscaleIP }
         $peerFailed = $false
 
         # For each retention type that applies today
@@ -1433,7 +1434,7 @@ function Invoke-BackupJob {
         $finalStatus     = if ($success) { "Success" } else { "Failed" }
 
         # Send heartbeat to RRM API
-        $errorMsg = if (-not $success) { $script:LastBackupError ?? "Backup failed - check log for details" } else { $null }
+        $errorMsg = if (-not $success) { if ($script:LastBackupError) { $script:LastBackupError } else { "Backup failed - check log for details" } } else { $null }
         Send-RrmHeartbeat `
             -JobName          $JobName `
             -Status           $finalStatus `
