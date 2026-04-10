@@ -646,7 +646,7 @@ function Install-Tailscale {
         }
         
         Write-Host "Authenticating with Tailscale..." -ForegroundColor Gray
-        & $tailscaleExe up --authkey=$AuthKey --unattended --accept-dns=false
+        & $tailscaleExe up --authkey=$AuthKey --unattended --accept-dns=true
         
         if ($LASTEXITCODE -ne 0) {
             throw "Tailscale authentication failed"
