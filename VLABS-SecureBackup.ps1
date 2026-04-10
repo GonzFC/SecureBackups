@@ -1765,16 +1765,28 @@ function Edit-BackupJob {
                         $aIdx = [int]$Matches[1] - 1
                         if ($aIdx -ge 0 -and $aIdx -lt $addable.Count) {
                             $toAdd = $addable[$aIdx]
+                            # Build proper UNC base path matching the format used on job creation
+                            # Format: \\DestIP\RR_Backups\CustomerCode\SourceLocation\JobName\type\
+                            $localCfg      = Get-RingConfig
+                            $customerCode  = $localCfg.CustomerCode ?? (Get-LocalCustomerCode)
+                            $sourceLocation = $localCfg.Location ?? $env:COMPUTERNAME
+                            $basePath = Get-DestinationPath `
+                                -TailscaleIP  $toAdd.TailscaleIP `
+                                -CustomerCode $customerCode `
+                                -Location     $sourceLocation `
+                                -Application  $job.JobName `
+                                -BackupType   $job.BackupType
                             $currentDestinations += [PSCustomObject]@{
-                                Hostname    = $toAdd.Hostname
-                                TailscaleIP = $toAdd.TailscaleIP
-                                Location    = $toAdd.Location
+                                Hostname     = $toAdd.Hostname
+                                TailscaleIP  = $toAdd.TailscaleIP
+                                Location     = $toAdd.Location
                                 CustomerCode = $toAdd.CustomerCode
-                                BasePath    = $toAdd.StoragePath
+                                BasePath     = $basePath
                             }
                             $label = if ($toAdd.Location) { $toAdd.Location } else { $toAdd.Hostname }
                             Write-Host "[OK] Added: $label" -ForegroundColor Green
-                            Start-Sleep -Milliseconds 600
+                            Write-Host "     Path: $basePath" -ForegroundColor Gray
+                            Start-Sleep -Milliseconds 800
                         }
                         else { Write-Host "Invalid number." -ForegroundColor Red; Start-Sleep -Milliseconds 600 }
                     }

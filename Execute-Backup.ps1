@@ -956,11 +956,12 @@ function Invoke-BackupToPeer {
     # CustomerCode from job, or fall back to ring-config
     $customerCode = if ($Job.CustomerCode) { $Job.CustomerCode } else { (Get-RingConfig).CustomerCode }
     
-    Write-Log "Backing up to peer: $($Peer.Hostname) ($peerIP) - Type: $RetentionType" -Level INFO
-    
+    $peerLabel = if ($Peer.Location) { $Peer.Location } else { $Peer.Hostname ?? $peerIP }
+    Write-Log "Backing up to peer: $peerLabel ($peerIP) - Type: $RetentionType" -Level INFO
+
     # Connect to peer
     if (-not (Connect-ToPeer -TailscaleIP $peerIP -CustomerCode $customerCode)) {
-        Write-Log "Failed to connect to peer: $peerIP" -Level ERROR
+        Write-Log "Failed to connect to peer: $peerLabel ($peerIP)" -Level ERROR
         return $false
     }
     
@@ -1099,26 +1100,37 @@ function Invoke-UnifiedBackup {
     }
     
     # Track results
-    $totalPeers = $executionPeers.Count
+    $totalPeers  = $executionPeers.Count
     $successPeers = 0
-    
+    $failedPeers  = @()
+
     # Backup to each peer
     foreach ($peer in $executionPeers) {
+        $peerLabel  = if ($peer.Location) { $peer.Location } else { $peer.Hostname ?? $peer.TailscaleIP }
+        $peerFailed = $false
+
         # For each retention type that applies today
         foreach ($retentionType in $retentionTypes) {
             # Skip monthly/weekly if retention count is 0
             if ($retentionType -eq 'monthly' -and $Job.RetentionMonthly -eq 0) { continue }
-            if ($retentionType -eq 'weekly' -and $Job.RetentionWeekly -eq 0) { continue }
-            
+            if ($retentionType -eq 'weekly'  -and $Job.RetentionWeekly  -eq 0) { continue }
+
             $result = Invoke-BackupToPeer -Peer $peer -Job $Job -RetentionType $retentionType
-            if ($result -and $retentionType -eq 'recent') {
-                $successPeers++
+            if ($retentionType -eq 'recent') {
+                if ($result) { $successPeers++ } else { $peerFailed = $true }
             }
         }
+
+        if ($peerFailed) { $failedPeers += $peerLabel }
     }
-    
-    Write-Log "Backup completed: $successPeers/$totalPeers peers successful" -Level $(if($successPeers -gt 0){'SUCCESS'}else{'ERROR'})
-    
+
+    if ($failedPeers.Count -gt 0) {
+        $script:LastBackupError = "Failed on: $($failedPeers -join ', ')"
+    }
+
+    Write-Log "Backup completed: $successPeers/$totalPeers peers successful$(if($failedPeers.Count -gt 0){" | Failed: $($failedPeers -join ', ')"})" `
+        -Level $(if ($successPeers -gt 0) { 'SUCCESS' } else { 'ERROR' })
+
     return ($successPeers -gt 0)
 }
 
