@@ -56,7 +56,10 @@ function Write-Log {
     Add-Content -Path $logFile -Value $logEntry -ErrorAction SilentlyContinue
     
     switch ($Level) {
-        'ERROR' { Write-Host $logEntry -ForegroundColor Red }
+        'ERROR' {
+            $script:LastBackupError = $Message
+            Write-Host $logEntry -ForegroundColor Red
+        }
         'WARNING' { Write-Host $logEntry -ForegroundColor Yellow }
         'SUCCESS' { Write-Host $logEntry -ForegroundColor Green }
         default { Write-Host $logEntry -ForegroundColor Gray }
@@ -1407,7 +1410,7 @@ function Invoke-BackupJob {
         $finalStatus     = if ($success) { "Success" } else { "Failed" }
 
         # Send heartbeat to RRM API
-        $errorMsg = if (-not $success) { "Backup failed  -  check log for details" } else { $null }
+        $errorMsg = if (-not $success) { $script:LastBackupError ?? "Backup failed - check log for details" } else { $null }
         Send-RrmHeartbeat `
             -JobName          $JobName `
             -Status           $finalStatus `
@@ -1430,6 +1433,8 @@ function Invoke-BackupJob {
         $durationSeconds = [int]((Get-Date) - $startTime).TotalSeconds
         $finalStatus     = 'Failed'
         Write-Log "Unhandled error in backup job '$JobName': $_" -Level ERROR
+        Send-RrmHeartbeat -JobName $JobName -Status $finalStatus -RanAt $startTime.ToString('o') `
+            -DurationSeconds $durationSeconds -SizeBytes $sizeBytes -ErrorMessage $script:LastBackupError
     }
     finally {
         # Always write the final status — even if the job crashed or was interrupted.
