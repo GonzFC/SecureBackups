@@ -142,6 +142,50 @@ function Invoke-AutoUpdate {
     }
 }
 
+function Ensure-AutoUpdateTask {
+    # Silently registers the RR-AutoUpdate scheduled task if it does not exist.
+    # Called on every job run so peers that never open the menu still get it.
+    $taskName = "RR-AutoUpdate"
+    try {
+        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existing) { return }   # already installed
+
+        $scriptFile = Join-Path $script:InstallPath 'Execute-Backup.ps1'
+        if (-not (Test-Path $scriptFile)) { return }
+
+        $action = New-ScheduledTaskAction `
+            -Execute "PowerShell.exe" `
+            -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$scriptFile`" -UpdateOnly"
+
+        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+            -RepetitionInterval (New-TimeSpan -Hours 1) `
+            -RepetitionDuration (New-TimeSpan -Days 9999)
+
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $principal   = New-ScheduledTaskPrincipal -UserId $currentUser -RunLevel Highest
+
+        $settings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -StartWhenAvailable `
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+            -MultipleInstances IgnoreNew
+
+        Register-ScheduledTask -TaskName $taskName `
+            -Action $action `
+            -Trigger $trigger `
+            -Principal $principal `
+            -Settings $settings `
+            -Description "VLABS Resilience Ring - hourly auto-update check" `
+            -ErrorAction Stop | Out-Null
+
+        Write-Log "Registered scheduled task: $taskName (hourly auto-update)" -Level INFO
+    }
+    catch {
+        Write-Log "Could not register auto-update task (non-fatal): $_" -Level WARNING
+    }
+}
+
 function Invoke-RrmUrlMigration {
     # Silently migrate old RRM URL to the new server if still present in config
     try {
@@ -1559,6 +1603,9 @@ try {
     if (-not $SkipUpdateCheck) {
         Invoke-AutoUpdate
     }
+
+    # Ensure the hourly auto-update task exists (registers silently if missing)
+    Ensure-AutoUpdateTask
 
     # Migrate old RRM URL to new server if needed
     Invoke-RrmUrlMigration
