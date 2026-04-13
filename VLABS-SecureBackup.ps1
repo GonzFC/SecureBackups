@@ -1419,11 +1419,11 @@ function Register-AutoUpdateTask {
             -Trigger $trigger `
             -Principal $principal `
             -Settings $settings `
-            -Description "VLABS Resilience Ring — hourly auto-update check" `
+            -Description "VLABS Resilience Ring - hourly auto-update check" `
             -ErrorAction Stop | Out-Null
 
         Write-Log "Registered scheduled task: $taskName (hourly)" -Level SUCCESS
-        if (-not $Silent) { Write-Host "[OK] Scheduled task '$taskName' registered (runs every hour)" -ForegroundColor Green }
+        if (-not $Silent) { Write-Host "Scheduled task '$taskName' registered (runs every hour)" -ForegroundColor Green }
         return $true
     }
     catch {
