@@ -1374,6 +1374,78 @@ function New-ScheduledBackupTask {
     }
 }
 
+function Register-AutoUpdateTask {
+    <#
+    .SYNOPSIS
+        Registers (or re-registers) a Windows Scheduled Task that runs every hour
+        to check for RR updates and apply them automatically.
+    #>
+    param([switch]$Silent)
+
+    $taskName = "RR-AutoUpdate"
+    try {
+        if (-not (Test-Path $ExecutionScript)) {
+            if (-not $Silent) { Write-Host "Execution script not found: $ExecutionScript" -ForegroundColor Red }
+            return $false
+        }
+
+        # Remove if already exists
+        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existing) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        }
+
+        $action = New-ScheduledTaskAction `
+            -Execute "PowerShell.exe" `
+            -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ExecutionScript`" -UpdateOnly"
+
+        # Run once now, repeat every hour indefinitely
+        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+            -RepetitionInterval (New-TimeSpan -Hours 1) `
+            -RepetitionDuration (New-TimeSpan -Days 9999)
+
+        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $principal  = New-ScheduledTaskPrincipal -UserId $currentUser -RunLevel Highest
+
+        $settings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -StartWhenAvailable `
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+            -MultipleInstances IgnoreNew
+
+        Register-ScheduledTask -TaskName $taskName `
+            -Action $action `
+            -Trigger $trigger `
+            -Principal $principal `
+            -Settings $settings `
+            -Description "VLABS Resilience Ring — hourly auto-update check" `
+            -ErrorAction Stop | Out-Null
+
+        Write-Log "Registered scheduled task: $taskName (hourly)" -Level SUCCESS
+        if (-not $Silent) { Write-Host "[OK] Scheduled task '$taskName' registered (runs every hour)" -ForegroundColor Green }
+        return $true
+    }
+    catch {
+        Write-Log "Failed to register auto-update task: $_" -Level WARNING
+        if (-not $Silent) { Write-Host "Warning: could not register auto-update task: $_" -ForegroundColor Yellow }
+        return $false
+    }
+}
+
+function Ensure-AutoUpdateTask {
+    <#
+    .SYNOPSIS
+        Silently registers the auto-update task if it doesn't already exist.
+        Called on each startup of the menu script.
+    #>
+    $taskName = "RR-AutoUpdate"
+    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if (-not $existing) {
+        Register-AutoUpdateTask -Silent | Out-Null
+    }
+}
+
 function Show-AllBackupJobs {
     Clear-Host
     Write-Host "`n===============================================" -ForegroundColor Cyan
@@ -1705,6 +1777,9 @@ function Edit-BackupJob {
             }
             else {
                 $currentDestinations = if ($jobs[$index].PeerDestinations) { @($jobs[$index].PeerDestinations) } else { @() }
+                $localRingCfg = Get-RingConfig
+                $localTailscaleIP = if ($localRingCfg) { $localRingCfg.TailscaleIP } else { $null }
+                $localHostname = $env:COMPUTERNAME
 
                 :peerMenu while ($true) {
                     Clear-Host
@@ -1728,7 +1803,13 @@ function Edit-BackupJob {
                     Write-Host "Available peers to add:" -ForegroundColor Yellow
                     $addable = @($availablePeers | Where-Object {
                         $ip = $_.TailscaleIP
-                        -not ($currentDestinations | Where-Object { $_.TailscaleIP -eq $ip })
+                        $hn = $_.Hostname
+                        # Exclude peers already added as destinations
+                        $alreadyAdded = [bool]($currentDestinations | Where-Object { $_.TailscaleIP -eq $ip })
+                        # Exclude local peer (a peer cannot back up to itself)
+                        $isLocal = ($localTailscaleIP -and $ip -eq $localTailscaleIP) -or
+                                   ($hn -and $hn -eq $localHostname)
+                        -not $alreadyAdded -and -not $isLocal
                     })
                     if ($addable.Count -eq 0) {
                         Write-Host "  (all known peers are already destinations)" -ForegroundColor Gray
@@ -2464,6 +2545,10 @@ if ($isDirectExecution -and -not $env:RESILIENCE_RING_IMPORT) {
     if (Initialize-Environment) {
         Write-Host "Initialization complete!" -ForegroundColor Green
         Write-Log "Application started" -Level INFO
+
+        # Ensure the hourly auto-update task exists (silent, non-blocking)
+        Ensure-AutoUpdateTask
+
         Start-Sleep -Seconds 1
         Start-MainLoop
     }

@@ -9,10 +9,12 @@
 #>
 
 param(
-    [Parameter(Mandatory=$true)]
     [string]$JobName,
 
-    [switch]$SkipUpdateCheck
+    [switch]$SkipUpdateCheck,
+
+    # Run only the auto-update check and exit — no backup job
+    [switch]$UpdateOnly
 )
 
 # Configuration - Data in ProgramData (separate from git install directory)
@@ -122,12 +124,17 @@ function Invoke-AutoUpdate {
             Write-Log "Auto-update: Tailscale DNS enabled" -Level INFO
         }
 
-        Write-Log "Auto-update: updated to $latestVersion. Re-launching job..." -Level INFO
+        Write-Log "Auto-update: updated to $latestVersion. Re-launching..." -Level INFO
 
-        # Re-invoke with updated scripts and skip update check to avoid loop
-        & powershell.exe -NonInteractive -ExecutionPolicy Bypass `
-            -File (Join-Path $script:InstallPath 'Execute-Backup.ps1') `
-            -JobName $JobName -SkipUpdateCheck
+        # Re-invoke the updated script and skip update check to avoid loop
+        $scriptFile = Join-Path $script:InstallPath 'Execute-Backup.ps1'
+        if ($UpdateOnly) {
+            & powershell.exe -NonInteractive -ExecutionPolicy Bypass `
+                -File $scriptFile -UpdateOnly -SkipUpdateCheck
+        } else {
+            & powershell.exe -NonInteractive -ExecutionPolicy Bypass `
+                -File $scriptFile -JobName $JobName -SkipUpdateCheck
+        }
         exit $LASTEXITCODE
     }
     catch {
@@ -1264,6 +1271,50 @@ function Invoke-LegacyBackup {
 
 #region RRM Heartbeat
 
+function Get-DiskSpaceInfo {
+    <#
+    .SYNOPSIS
+        Returns disk stats for the drive hosting the RR backup storage path.
+        Includes total/free/used bytes, free%, and the backup folder total size.
+    #>
+    $config = Get-RingConfig
+    if (-not $config -or -not $config.StoragePath) { return $null }
+
+    $storagePath = $config.StoragePath
+    try {
+        $driveLetter = Split-Path -Qualifier $storagePath -ErrorAction Stop
+        $drive = Get-PSDrive -Name ($driveLetter.TrimEnd(':')) -ErrorAction Stop
+        $freeBytes  = [long]$drive.Free
+        $usedBytes  = [long]$drive.Used
+        $totalBytes = $freeBytes + $usedBytes
+        $freePercent = if ($totalBytes -gt 0) { [math]::Round(($freeBytes / $totalBytes) * 100, 1) } else { 0 }
+
+        if ($freePercent -lt 10) {
+            Write-Log "WARNING: Disk space on backup drive is critically low ($freePercent% free)" -Level WARNING
+        }
+
+        # Backup folder size (non-blocking — skip if slow)
+        $folderBytes = 0L
+        if (Test-Path $storagePath) {
+            $measured = Get-ChildItem -Path $storagePath -Recurse -File -ErrorAction SilentlyContinue |
+                        Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue
+            if ($measured -and $measured.Sum) { $folderBytes = [long]$measured.Sum }
+        }
+
+        return @{
+            TotalBytes       = $totalBytes
+            FreeBytes        = $freeBytes
+            UsedBytes        = $usedBytes
+            FreePercent      = $freePercent
+            BackupFolderBytes = $folderBytes
+        }
+    }
+    catch {
+        Write-Log "Could not read disk space info: $_" -Level WARNING
+        return $null
+    }
+}
+
 function Send-RrmHeartbeat {
     <#
     .SYNOPSIS
@@ -1282,9 +1333,10 @@ function Send-RrmHeartbeat {
         [Parameter(Mandatory=$true)]
         [string]$RanAt,          # ISO 8601 string  -  start time of the execution
 
-        [int]$DurationSeconds = 0,
-        [long]$SizeBytes      = 0,
-        [string]$ErrorMessage = $null
+        [int]$DurationSeconds    = 0,
+        [long]$SizeBytes         = 0,
+        [string]$ErrorMessage    = $null,
+        $DiskInfo                = $null   # hashtable from Get-DiskSpaceInfo, optional
     )
 
     $config = Get-RingConfig
@@ -1323,9 +1375,20 @@ function Send-RrmHeartbeat {
         }
     }
 
+    $diskPayload = $null
+    if ($DiskInfo) {
+        $diskPayload = @{
+            totalBytes        = $DiskInfo.TotalBytes
+            freeBytes         = $DiskInfo.FreeBytes
+            freePercent       = $DiskInfo.FreePercent
+            backupFolderBytes = $DiskInfo.BackupFolderBytes
+        }
+    }
+
     $payload = @{
         hostname  = $config.Hostname
         rrVersion = (Get-LocalRrVersion)
+        disk      = $diskPayload
         jobs      = @(
             @{
                 name             = $job.JobName
@@ -1435,13 +1498,15 @@ function Invoke-BackupJob {
 
         # Send heartbeat to RRM API
         $errorMsg = if (-not $success) { if ($script:LastBackupError) { $script:LastBackupError } else { "Backup failed - check log for details" } } else { $null }
+        $diskInfo = Get-DiskSpaceInfo
         Send-RrmHeartbeat `
             -JobName          $JobName `
             -Status           $finalStatus `
             -RanAt            $startTime.ToString('o') `
             -DurationSeconds  $durationSeconds `
             -SizeBytes        $sizeBytes `
-            -ErrorMessage     $errorMsg
+            -ErrorMessage     $errorMsg `
+            -DiskInfo         $diskInfo
 
         # After successful backup, enforce ring policies on job master data
         if ($success) {
@@ -1458,7 +1523,8 @@ function Invoke-BackupJob {
         $finalStatus     = 'Failed'
         Write-Log "Unhandled error in backup job '$JobName': $_" -Level ERROR
         Send-RrmHeartbeat -JobName $JobName -Status $finalStatus -RanAt $startTime.ToString('o') `
-            -DurationSeconds $durationSeconds -SizeBytes $sizeBytes -ErrorMessage $script:LastBackupError
+            -DurationSeconds $durationSeconds -SizeBytes $sizeBytes -ErrorMessage $script:LastBackupError `
+            -DiskInfo (Get-DiskSpaceInfo)
     }
     finally {
         # Always write the final status — even if the job crashed or was interrupted.
@@ -1472,6 +1538,21 @@ function Invoke-BackupJob {
 try {
     if (-not (Test-Path $LogPath)) {
         New-Item -Path $LogPath -ItemType Directory -Force | Out-Null
+    }
+
+    # -UpdateOnly mode: just check/apply update and exit — no backup
+    if ($UpdateOnly) {
+        if (-not $SkipUpdateCheck) {
+            Invoke-AutoUpdate
+        }
+        Write-Log "UpdateOnly: already on latest version $(Get-LocalRrVersion)" -Level INFO
+        exit 0
+    }
+
+    # Normal mode: require -JobName
+    if (-not $JobName) {
+        Write-Error "JobName is required unless -UpdateOnly is specified."
+        exit 1
     }
 
     # Auto-update: check for new version and re-launch if updated
