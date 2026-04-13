@@ -1318,38 +1318,41 @@ function Invoke-LegacyBackup {
 function Get-DiskSpaceInfo {
     <#
     .SYNOPSIS
-        Returns disk stats for the drive hosting the RR backup storage path.
-        Includes total/free/used bytes, free%, and the backup folder total size.
+        Returns disk stats for the peer's main drive.
+        Uses StoragePath drive if configured, falls back to the system drive (C:).
+        Also reports the size of the RR backup storage folder when available.
     #>
     $config = Get-RingConfig
-    if (-not $config -or -not $config.StoragePath) { return $null }
 
-    $storagePath = $config.StoragePath
+    # Determine which drive to report: prefer StoragePath, fall back to system drive
+    $storagePath = if ($config -and $config.StoragePath) { $config.StoragePath } else { $null }
+    $drivePath   = if ($storagePath) { $storagePath } else { $env:SystemDrive + '\' }
+
     try {
-        $driveLetter = Split-Path -Qualifier $storagePath -ErrorAction Stop
-        $drive = Get-PSDrive -Name ($driveLetter.TrimEnd(':')) -ErrorAction Stop
-        $freeBytes  = [long]$drive.Free
-        $usedBytes  = [long]$drive.Used
-        $totalBytes = $freeBytes + $usedBytes
+        $driveLetter = (Split-Path -Qualifier $drivePath -ErrorAction Stop).TrimEnd(':')
+        $drive = Get-PSDrive -Name $driveLetter -ErrorAction Stop
+        $freeBytes   = [long]$drive.Free
+        $usedBytes   = [long]$drive.Used
+        $totalBytes  = $freeBytes + $usedBytes
         $freePercent = if ($totalBytes -gt 0) { [math]::Round(($freeBytes / $totalBytes) * 100, 1) } else { 0 }
 
         if ($freePercent -lt 10) {
-            Write-Log "WARNING: Disk space on backup drive is critically low ($freePercent% free)" -Level WARNING
+            Write-Log "WARNING: Disk space critically low ($freePercent% free on $driveLetter`:)" -Level WARNING
         }
 
-        # Backup folder size (non-blocking — skip if slow)
+        # Backup folder size — only if StoragePath is configured and exists
         $folderBytes = 0L
-        if (Test-Path $storagePath) {
+        if ($storagePath -and (Test-Path $storagePath)) {
             $measured = Get-ChildItem -Path $storagePath -Recurse -File -ErrorAction SilentlyContinue |
                         Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue
             if ($measured -and $measured.Sum) { $folderBytes = [long]$measured.Sum }
         }
 
         return @{
-            TotalBytes       = $totalBytes
-            FreeBytes        = $freeBytes
-            UsedBytes        = $usedBytes
-            FreePercent      = $freePercent
+            TotalBytes        = $totalBytes
+            FreeBytes         = $freeBytes
+            UsedBytes         = $usedBytes
+            FreePercent       = $freePercent
             BackupFolderBytes = $folderBytes
         }
     }
