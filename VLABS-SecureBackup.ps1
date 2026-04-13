@@ -281,10 +281,13 @@ function Save-Jobs {
 
     try {
         # Strip transaction data properties before saving master data
-        $masterDataProperties = @('JobName', 'BackupType', 'BackupObject', 'TargetPeers', 
-                                   'Schedule', 'StartHour', 'Retention', 'RetentionMonthly', 
-                                   'RetentionWeekly', 'RetentionRecent', 'TaskName', 'Enabled')
-        
+        $masterDataProperties = @('JobName', 'AppName', 'AppNameClean', 'BackupType', 'BackupObject',
+                                   'SourceLocation', 'CustomerCode', 'TargetPeers', 'PeerDestinations',
+                                   'Schedule', 'Frequency', 'StartHour', 'Retention', 'RetentionMonthly',
+                                   'RetentionWeekly', 'RetentionRecent', 'TaskName', 'Enabled',
+                                   'Destination', 'DestinationPath', 'DestinationDomain',
+                                   'DestinationUsername', 'DestinationEncryptedPassword', 'CreatedDate')
+
         $cleanJobs = @()
         foreach ($job in $Jobs) {
             $cleanJob = @{}
@@ -295,7 +298,7 @@ function Save-Jobs {
             }
             $cleanJobs += [PSCustomObject]$cleanJob
         }
-        
+
         if ($cleanJobs.Count -eq 0) {
             "[]" | Set-Content $JobsFile -ErrorAction Stop
         }

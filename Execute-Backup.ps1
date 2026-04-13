@@ -95,9 +95,12 @@ function Save-Jobs {
     param($Jobs)
     try {
         # Strip transaction data properties before saving master data
-        $masterDataProperties = @('JobName', 'BackupType', 'BackupObject', 'TargetPeers', 
-                                   'Schedule', 'StartHour', 'Retention', 'RetentionMonthly', 
-                                   'RetentionWeekly', 'RetentionRecent', 'TaskName', 'Enabled')
+        $masterDataProperties = @('JobName', 'AppName', 'AppNameClean', 'BackupType', 'BackupObject',
+                                   'SourceLocation', 'CustomerCode', 'TargetPeers', 'PeerDestinations',
+                                   'Schedule', 'Frequency', 'StartHour', 'Retention', 'RetentionMonthly',
+                                   'RetentionWeekly', 'RetentionRecent', 'TaskName', 'Enabled',
+                                   'Destination', 'DestinationPath', 'DestinationDomain',
+                                   'DestinationUsername', 'DestinationEncryptedPassword', 'CreatedDate')
         
         $cleanJobs = @()
         foreach ($job in $Jobs) {
