@@ -869,7 +869,7 @@ function Register-PeerWithRrmApi {
     if (-not $config) { return }
 
     # Use defaults for peers that haven't been configured with RRM yet
-    $defaultRrmUrl   = 'https://mercury.velociraptor-hoki.ts.net'
+    $defaultRrmUrl   = 'https://rr-api.ait.vlabs.network'
     $defaultProjectId = 1
 
     $rrmUrl   = if ($config.RrmApiUrl)  { $config.RrmApiUrl }  else { $defaultRrmUrl }
@@ -1198,7 +1198,7 @@ function Add-StoragePeer {
     Write-Host "If you have a Resilience Ring Monitor URL and Project ID," -ForegroundColor Gray
     Write-Host "this peer will register automatically and appear in the dashboard." -ForegroundColor Gray
     Write-Host ""
-    $rrmDefaultUrl = 'https://mercury.velociraptor-hoki.ts.net'
+    $rrmDefaultUrl = 'https://rr-api.ait.vlabs.network'
     Write-Host "RRM API URL [default: $rrmDefaultUrl] (leave blank to skip): " -NoNewline -ForegroundColor White
     $rrmApiUrlInput = (Read-Host).Trim()
     $rrmApiUrl = if ($rrmApiUrlInput) { $rrmApiUrlInput } else { $rrmDefaultUrl }
