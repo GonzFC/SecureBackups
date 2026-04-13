@@ -1589,6 +1589,9 @@ try {
         if (-not $SkipUpdateCheck) {
             Invoke-AutoUpdate
         }
+        # Also ensure the scheduled task exists (this is where it gets installed
+        # on peers that updated but haven't run a job yet)
+        Ensure-AutoUpdateTask
         Write-Log "UpdateOnly: already on latest version $(Get-LocalRrVersion)" -Level INFO
         exit 0
     }
