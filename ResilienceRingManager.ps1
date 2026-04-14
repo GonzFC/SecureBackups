@@ -73,10 +73,22 @@ function Write-Log {
 #region Update Management
 
 function Get-LatestRRMVersion {
+    # Try GitHub Contents API first (no CDN caching).
+    # Fall back to raw.githubusercontent.com in case the API is firewalled.
     try {
-        $versionUrl = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/rrm-version.txt"
-        $latestVersion = (Invoke-RestMethod -Uri $versionUrl -UseBasicParsing -TimeoutSec 10).Trim()
-        return $latestVersion
+        $apiUrl      = "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/contents/rrm-version.txt?ref=$script:RepoBranch"
+        $apiResponse = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -TimeoutSec 10 `
+                           -Headers @{ 'Accept' = 'application/vnd.github.v3+json'; 'User-Agent' = 'RRM-UpdateCheck' }
+        return [System.Text.Encoding]::UTF8.GetString(
+                   [System.Convert]::FromBase64String(
+                       ($apiResponse.content -replace "`n","" -replace "`r","")
+                   )).Trim()
+    }
+    catch {}
+
+    try {
+        $rawUrl = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/rrm-version.txt"
+        return (Invoke-RestMethod -Uri $rawUrl -UseBasicParsing -TimeoutSec 10).Trim()
     }
     catch {
         return $null
