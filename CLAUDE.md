@@ -62,6 +62,31 @@ El ecosistema tiene tres capas:
 - **Heartbeat a API**: `Send-RrmHeartbeat` en bloque `finally` de `Invoke-BackupJob`. Todo path de falla (Tailscale, crash early) debe mandar heartbeat para que la API no quede en status "Running".
 - **Separacion master/transaction**: `jobs.json` nunca se modifica en runtime. `jobs-status.json` es la unica fuente de estado mutable.
 
+## Bugs conocidos y por que el codigo esta como esta
+
+Estas decisiones de diseno no son obvias. Si ves el codigo y te preguntas "por que hacen esto asi", la razon esta aqui.
+
+### PowerShell 5.1 no lee UTF-8 sin BOM
+Los .ps1 en este repo son ASCII puro. Antes tenian em dashes (`-`), flechas (`->`), caracteres box-drawing. PowerShell 5.1 en Windows usa CP1252 por defecto si no hay BOM, convirtiendo esos chars en `a-"` y causando ParseException al cargar el script. El resultado visible: jobs se quedaban en status "Running" porque el proceso moria antes de arrancar. **Regla: nunca usar caracteres fuera de ASCII 0-127 en ningun .ps1.**
+
+### `proc.ExitCode` es null con `Start-Process -NoNewWindow` en PS 5.1
+En `Invoke-BackupToPeer`, robocopy se lanza via `[System.Diagnostics.Process]::Start()` con `UseShellExecute=$false`, NO con `Start-Process`. Razon: `Start-Process -NoNewWindow -PassThru` en algunos builds de Windows/PS 5.1 cierra el handle del proceso antes de que `ExitCode` sea legible, retornando null. Con `ProcessStartInfo` + `UseShellExecute=$false` el handle se mantiene abierto hasta que se llama `Dispose()` explicitamente.
+
+### `Start-Job` vs `Start-Process` para ejecutar jobs manualmente
+`VLABS-SecureBackup.ps1` usa `Start-Process -WindowStyle Hidden` para lanzar `Execute-Backup.ps1`. Antes usaba `Start-Job`. El problema con `Start-Job`: el proceso hijo esta atado a la sesion padre. Cuando el usuario cierra la ventana del menu, el job de backup se mata a mitad, sin reportar resultado a la API. `Start-Process` crea un proceso completamente independiente.
+
+### Dos version files separados
+`version.txt` es la version del peer agent. `rrm-version.txt` es la version del RRM. Son independientes porque el RRM y el agente pueden actualizarse por separado. Ambos se deben bumpar cuando cambia el archivo correspondiente.
+
+### Auto-update solo en tarea programada, nunca antes de un job
+Antes de v1.9.73, `Invoke-AutoUpdate` se llamaba antes de cada backup. Si GitHub era lento o el ZIP fallaba, el backup nunca arrancaba. Ahora `Invoke-AutoUpdate` solo se llama en modo `-UpdateOnly` (tarea programada horaria). Los jobs de backup no esperan actualizaciones.
+
+### Tarea `RR-AutoUpdate` debe correr como SYSTEM
+Si se registra con el usuario actual y ese usuario no tiene sesion activa (ej. servidor sin nadie logueado), la tarea falla silenciosamente. `Ensure-AutoUpdateTask` en ambos scripts verifica el principal y recrea la tarea si no es SYSTEM.
+
+### Heartbeat en `finally`, no solo en el camino feliz
+`Send-RrmHeartbeat` esta en el bloque `finally` de `Invoke-BackupJob` para garantizar que la API siempre reciba el resultado final. Ademas, los paths de falla tempranos (Tailscale unavailable, crash antes de `Invoke-BackupJob`) tambien mandan heartbeat explicitamente. Sin esto, la API queda mostrando el job como "Running" indefinidamente.
+
 ## Versiones actuales
 
 - Peer agent: ver `version.txt` (actualmente 1.9.78)
