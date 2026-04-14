@@ -28,8 +28,8 @@ $script:RepoOwner  = 'GonzFC'
 $script:RepoName   = 'SecureBackups'
 $script:RepoBranch = 'main'
 $script:InstallPath = $PSScriptRoot
-$script:OldRrmUrl  = 'https://mercury.velociraptor-hoki.ts.net'
-$script:NewRrmUrl  = 'https://rr-api.ait.vlabs.network'
+$script:OldRrmUrl  = 'https://rr-api.ait.vlabs.network'
+$script:NewRrmUrl  = 'https://mercury.velociraptor-hoki.ts.net'
 
 # Load helper modules
 $cryptoUtilsPath = Join-Path $PSScriptRoot "CryptoUtils.ps1"
@@ -1525,7 +1525,7 @@ function Send-RrmHeartbeat {
     }
 
     # Use default URL for peers not yet configured with RRM
-    $rrmUrl = if ($config.RrmApiUrl) { $config.RrmApiUrl } else { 'https://rr-api.ait.vlabs.network' }
+    $rrmUrl = if ($config.RrmApiUrl) { $config.RrmApiUrl } else { 'https://mercury.velociraptor-hoki.ts.net' }
 
     # If no ApiKey, attempt registration first so we can send heartbeats
     if (-not $config.RrmApiKey) {
