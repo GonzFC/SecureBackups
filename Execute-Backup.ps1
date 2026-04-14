@@ -122,33 +122,50 @@ function Invoke-AutoUpdate {
         $gitRepo = Test-Path (Join-Path $script:InstallPath '.git')
 
         if ($gitAvailable -and $gitRepo) {
-            # Run git with a hard timeout so a slow/unresponsive remote can't
-            # block the backup indefinitely.
-            $gitTimeout = 60   # seconds
+            $gitTimeout = 60
             foreach ($gitArgs in @("fetch origin $script:RepoBranch", "reset --hard origin/$script:RepoBranch")) {
                 $proc = Start-Process -FilePath "git" -ArgumentList $gitArgs `
                             -WorkingDirectory $script:InstallPath `
                             -NoNewWindow -PassThru -ErrorAction SilentlyContinue
                 if ($proc -and -not $proc.WaitForExit($gitTimeout * 1000)) {
                     $proc.Kill()
-                    Write-Log "Auto-update: git timed out after ${gitTimeout}s — skipping update" -Level WARNING
+                    Write-Log "Auto-update: git timed out — skipping update" -Level WARNING
                     return
                 }
             }
-        } else {
-            $zipUrl  = "https://github.com/$script:RepoOwner/$script:RepoName/archive/refs/heads/$script:RepoBranch.zip"
-            $zipPath = Join-Path $env:TEMP 'RR_Update.zip'
-            $tmpPath = Join-Path $env:TEMP 'RR_Update_Extract'
-            # TimeoutSec ensures the download never hangs the backup indefinitely.
-            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 120
-            if (Test-Path $tmpPath) { Remove-Item $tmpPath -Recurse -Force }
-            Expand-Archive -Path $zipPath -DestinationPath $tmpPath -Force
-            $srcFolder = Get-ChildItem $tmpPath -Directory | Select-Object -First 1
-            Get-ChildItem $srcFolder.FullName -File | ForEach-Object {
-                Copy-Item $_.FullName -Destination (Join-Path $script:InstallPath $_.Name) -Force
+        }
+        else {
+            # Download files one-by-one via GitHub Contents API.
+            # This is far more reliable than a ZIP archive download because:
+            #   - Each file is small (< 100 KB) with its own 30-second timeout
+            #   - No ZIP extraction step that can fail or hang
+            #   - Works even when bulk archive downloads are blocked by firewalls
+            Write-Log "Auto-update: downloading files via GitHub API..." -Level INFO
+
+            $contentsUrl = "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/contents?ref=$script:RepoBranch"
+            $fileList    = Invoke-RestMethod -Uri $contentsUrl -UseBasicParsing -TimeoutSec 15 `
+                               -Headers @{ 'Accept' = 'application/vnd.github.v3+json'; 'User-Agent' = 'RR-AutoUpdate' }
+
+            $downloaded = 0
+            $failed     = 0
+            foreach ($item in ($fileList | Where-Object { $_.type -eq 'file' -and $_.download_url })) {
+                try {
+                    $resp     = Invoke-WebRequest -Uri $item.download_url -UseBasicParsing -TimeoutSec 30
+                    $destPath = Join-Path $script:InstallPath $item.name
+                    [System.IO.File]::WriteAllBytes($destPath, $resp.Content)
+                    $downloaded++
+                }
+                catch {
+                    Write-Log "Auto-update: failed to download $($item.name): $_" -Level WARNING
+                    $failed++
+                }
             }
-            Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-            Remove-Item $tmpPath -Recurse -Force -ErrorAction SilentlyContinue
+
+            if ($downloaded -eq 0) {
+                Write-Log "Auto-update: no files downloaded — skipping update" -Level WARNING
+                return
+            }
+            Write-Log "Auto-update: $downloaded file(s) downloaded, $failed failed" -Level INFO
         }
 
         Get-ChildItem -Path $script:InstallPath -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
