@@ -80,14 +80,41 @@ function Get-LocalRrVersion {
 
 function Invoke-AutoUpdate {
     try {
-        # Use the GitHub Contents API instead of raw.githubusercontent.com to avoid CDN cache delays
-        $versionUrl    = "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/contents/version.txt?ref=$script:RepoBranch"
-        $apiResponse   = Invoke-RestMethod -Uri $versionUrl -UseBasicParsing -TimeoutSec 10 `
-                             -Headers @{ 'Accept' = 'application/vnd.github.v3+json' }
-        $latestVersion = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($apiResponse.content)).Trim()
+        # Try GitHub Contents API first (no CDN caching).
+        # Fall back to raw.githubusercontent.com in case the API is firewalled.
+        $latestVersion = $null
         $currentVersion = Get-LocalRrVersion
 
-        if ($null -eq $currentVersion -or [Version]$latestVersion -le [Version]$currentVersion) { return }
+        try {
+            $versionUrl  = "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/contents/version.txt?ref=$script:RepoBranch"
+            $apiResponse = Invoke-RestMethod -Uri $versionUrl -UseBasicParsing -TimeoutSec 10 `
+                               -Headers @{ 'Accept' = 'application/vnd.github.v3+json'; 'User-Agent' = 'RR-AutoUpdate' }
+            $latestVersion = [System.Text.Encoding]::UTF8.GetString(
+                                 [System.Convert]::FromBase64String(
+                                     ($apiResponse.content -replace "`n","" -replace "`r","")
+                                 )).Trim()
+        }
+        catch {
+            Write-Log "Auto-update: GitHub API unreachable ($_), trying raw URL..." -Level WARNING
+        }
+
+        if (-not $latestVersion) {
+            try {
+                $rawUrl        = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/version.txt"
+                $latestVersion = (Invoke-RestMethod -Uri $rawUrl -UseBasicParsing -TimeoutSec 10).Trim()
+            }
+            catch {
+                Write-Log "Auto-update: version check failed (raw URL also unreachable): $_" -Level WARNING
+                return
+            }
+        }
+
+        Write-Log "Auto-update: current=$currentVersion  latest=$latestVersion" -Level INFO
+
+        if ($null -eq $currentVersion -or [Version]$latestVersion -le [Version]$currentVersion) {
+            Write-Log "Auto-update: already up to date ($currentVersion)" -Level INFO
+            return
+        }
 
         Write-Log "Auto-update: new version available ($currentVersion -> $latestVersion). Updating..." -Level INFO
 
@@ -146,32 +173,44 @@ function Invoke-AutoUpdate {
 }
 
 function Ensure-AutoUpdateTask {
-    # Silently registers the RR-AutoUpdate scheduled task if it does not exist.
+    # Registers (or repairs) the RR-AutoUpdate scheduled task.
+    # Always uses SYSTEM as the principal so the task works regardless of
+    # which user account triggered the backup job.
     # Called on every job run so peers that never open the menu still get it.
     $taskName = "RR-AutoUpdate"
     try {
-        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($existing) { return }   # already installed
-
         $scriptFile = Join-Path $script:InstallPath 'Execute-Backup.ps1'
         if (-not (Test-Path $scriptFile)) { return }
 
+        # Check whether the existing task is already configured correctly.
+        # If it runs as a non-SYSTEM account it will fail when no user is
+        # logged in, so we recreate it in that case.
+        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existing) {
+            $principalId = $existing.Principal.UserId
+            if ($principalId -match 'SYSTEM') { return }   # already correct — nothing to do
+            # Task exists but with wrong principal — remove and recreate
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            Write-Log "Re-registering $taskName with SYSTEM principal (was: $principalId)" -Level INFO
+        }
+
         $action = New-ScheduledTaskAction `
             -Execute "PowerShell.exe" `
-            -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$scriptFile`" -UpdateOnly"
+            -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptFile`" -UpdateOnly"
 
-        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        # First run in 1 hour (the current backup run already checked for updates).
+        # RepetitionDuration 9999 days ≈ forever.
+        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddHours(1) `
             -RepetitionInterval (New-TimeSpan -Hours 1) `
             -RepetitionDuration (New-TimeSpan -Days 9999)
 
-        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-        $principal   = New-ScheduledTaskPrincipal -UserId $currentUser -RunLevel Highest
+        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
 
         $settings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries `
             -StartWhenAvailable `
-            -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
             -MultipleInstances IgnoreNew
 
         Register-ScheduledTask -TaskName $taskName `
@@ -182,7 +221,7 @@ function Ensure-AutoUpdateTask {
             -Description "VLABS Resilience Ring - hourly auto-update check" `
             -ErrorAction Stop | Out-Null
 
-        Write-Log "Registered scheduled task: $taskName (hourly auto-update)" -Level INFO
+        Write-Log "Registered scheduled task: $taskName (hourly, SYSTEM, hidden)" -Level INFO
     }
     catch {
         Write-Log "Could not register auto-update task (non-fatal): $_" -Level WARNING
