@@ -1359,13 +1359,21 @@ function Invoke-BackupToPeer {
         # Launch robocopy as a child process so we can log progress while it runs.
         # WaitForExit(60000) blocks for up to 60 s; returns $false if still running,
         # letting us write a heartbeat line to the log every minute.
-        $proc = Start-Process -FilePath "robocopy" -ArgumentList ($robocopyArgs -join ' ') `
+        # Pass args as array (not joined string) to avoid quoting issues with paths.
+        $proc = Start-Process -FilePath "robocopy" -ArgumentList $robocopyArgs `
                     -NoNewWindow -PassThru -ErrorAction Stop
         while (-not $proc.WaitForExit(60000)) {
             $elapsed = [int]((Get-Date) - $peerStartTime).TotalMinutes
             Write-Log "Robocopy running  -  ${elapsed} min elapsed ($peerLabel)" -Level INFO
         }
+        # Call WaitForExit() without timeout to close the async event queue and
+        # guarantee ExitCode is populated (known race condition in .NET Process class).
+        $proc.WaitForExit()
         $exitCode = $proc.ExitCode
+        if ($null -eq $exitCode) {
+            Write-Log "Warning: proc.ExitCode is null after WaitForExit - defaulting to -1" -Level WARNING
+            $exitCode = -1
+        }
     }
     catch {
         Write-Log "Robocopy exception: $_" -Level ERROR
@@ -1420,11 +1428,11 @@ function Invoke-BackupToPeer {
         }
     }
     else {
-        Write-Log "Robocopy failed with exit code: $LASTEXITCODE" -Level ERROR
+        Write-Log "Robocopy failed with exit code: $exitCode" -Level ERROR
     }
-    
+
     Disconnect-FromPeer -TailscaleIP $peerIP
-    
+
     return $success
 }
 
