@@ -89,8 +89,8 @@ Si se registra con el usuario actual y ese usuario no tiene sesion activa (ej. s
 
 ## Versiones actuales
 
-- Peer agent: ver `version.txt` (actualmente 1.9.78)
-- RRM: ver `rrm-version.txt` (actualmente 1.2.5)
+- Peer agent: ver `version.txt` (actualmente 1.9.80)
+- RRM: ver `rrm-version.txt` (actualmente 1.2.6)
 
 ## Como probar cambios
 

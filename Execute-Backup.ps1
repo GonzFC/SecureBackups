@@ -73,8 +73,20 @@ function Write-Log {
 #region Auto-Update
 
 function Get-LocalRrVersion {
-    $versionFile = Join-Path $script:InstallPath 'version.txt'
-    if (Test-Path $versionFile) { return (Get-Content $versionFile -Raw).Trim() }
+    # Try the script's own directory first ($PSScriptRoot via $script:InstallPath).
+    # If that path is empty (e.g. task launched with -Command instead of -File),
+    # fall back to the known install locations so we always find version.txt.
+    $candidates = @(
+        $script:InstallPath,
+        'C:\VLABS_ResilienceRing',
+        'C:\VLABS_resiliencering',
+        'C:\vlabs_resiliencering'
+    ) | Where-Object { $_ -ne '' -and $_ -ne $null }
+
+    foreach ($dir in $candidates) {
+        $versionFile = Join-Path $dir 'version.txt'
+        if (Test-Path $versionFile) { return (Get-Content $versionFile -Raw).Trim() }
+    }
     return $null
 }
 
@@ -111,9 +123,15 @@ function Invoke-AutoUpdate {
 
         Write-Log "Auto-update: current=$currentVersion  latest=$latestVersion" -Level INFO
 
-        if ($null -eq $currentVersion -or [Version]$latestVersion -le [Version]$currentVersion) {
+        # Only skip if we know the local version AND it is already current.
+        # If $currentVersion is null (version.txt unreadable) we MUST update --
+        # skipping would leave the peer stuck forever on an unknown version.
+        if ($currentVersion -ne $null -and [Version]$latestVersion -le [Version]$currentVersion) {
             Write-Log "Auto-update: already up to date ($currentVersion)" -Level INFO
             return
+        }
+        if ($null -eq $currentVersion) {
+            Write-Log "Auto-update: local version unreadable -- forcing update to $latestVersion" -Level WARNING
         }
 
         Write-Log "Auto-update: new version available ($currentVersion -> $latestVersion). Updating..." -Level INFO
@@ -206,8 +224,14 @@ function Ensure-AutoUpdateTask {
     # Called on every job run so peers that never open the menu still get it.
     $taskName = "RR-AutoUpdate"
     try {
-        $scriptFile = Join-Path $script:InstallPath 'Execute-Backup.ps1'
-        if (-not (Test-Path $scriptFile)) { return }
+        # Resolve the script file using the same fallback logic as Get-LocalRrVersion
+        # so Ensure-AutoUpdateTask works even when $PSScriptRoot is empty.
+        $scriptFile = $null
+        foreach ($dir in @($script:InstallPath, 'C:\VLABS_ResilienceRing', 'C:\VLABS_resiliencering', 'C:\vlabs_resiliencering') | Where-Object { $_ }) {
+            $candidate = Join-Path $dir 'Execute-Backup.ps1'
+            if (Test-Path $candidate) { $scriptFile = $candidate; break }
+        }
+        if (-not $scriptFile) { return }
 
         # Check whether the existing task is already configured correctly.
         # If it runs as a non-SYSTEM account it will fail when no user is
@@ -1786,7 +1810,8 @@ function Send-RrmHeartbeat {
             -TimeoutSec  30 `
             -ErrorAction Stop | Out-Null
 
-        Write-Log "RRM heartbeat OK  -  job='$JobName' status='$Status'" -Level INFO
+        $diskTag = if ($diskPayload) { "disk=yes" } else { "disk=no" }
+        Write-Log "RRM heartbeat OK  -  job='$JobName' status='$Status' rrVersion='$(Get-LocalRrVersion)' $diskTag" -Level INFO
     }
     catch {
         # Non-fatal: peer keeps working even if the API is unreachable
