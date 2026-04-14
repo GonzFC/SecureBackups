@@ -13,7 +13,7 @@ param(
 
     [switch]$SkipUpdateCheck,
 
-    # Run only the auto-update check and exit — no backup job
+    # Run only the auto-update check and exit  -  no backup job
     [switch]$UpdateOnly
 )
 
@@ -129,7 +129,7 @@ function Invoke-AutoUpdate {
                             -NoNewWindow -PassThru -ErrorAction SilentlyContinue
                 if ($proc -and -not $proc.WaitForExit($gitTimeout * 1000)) {
                     $proc.Kill()
-                    Write-Log "Auto-update: git timed out — skipping update" -Level WARNING
+                    Write-Log "Auto-update: git timed out  -  skipping update" -Level WARNING
                     return
                 }
             }
@@ -162,7 +162,7 @@ function Invoke-AutoUpdate {
             }
 
             if ($downloaded -eq 0) {
-                Write-Log "Auto-update: no files downloaded — skipping update" -Level WARNING
+                Write-Log "Auto-update: no files downloaded  -  skipping update" -Level WARNING
                 return
             }
             Write-Log "Auto-update: $downloaded file(s) downloaded, $failed failed" -Level INFO
@@ -215,8 +215,8 @@ function Ensure-AutoUpdateTask {
         $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         if ($existing) {
             $principalId = $existing.Principal.UserId
-            if ($principalId -match 'SYSTEM') { return }   # already correct — nothing to do
-            # Task exists but with wrong principal — remove and recreate
+            if ($principalId -match 'SYSTEM') { return }   # already correct  -  nothing to do
+            # Task exists but with wrong principal  -  remove and recreate
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
             Write-Log "Re-registering $taskName with SYSTEM principal (was: $principalId)" -Level INFO
         }
@@ -226,7 +226,7 @@ function Ensure-AutoUpdateTask {
             -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptFile`" -UpdateOnly"
 
         # First run in 1 hour (the current backup run already checked for updates).
-        # RepetitionDuration 9999 days ≈ forever.
+        # RepetitionDuration 9999 days ~ forever.
         $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddHours(1) `
             -RepetitionInterval (New-TimeSpan -Hours 1) `
             -RepetitionDuration (New-TimeSpan -Days 9999)
@@ -754,7 +754,7 @@ function Write-BackupManifest {
         })
 
         $lines | Set-Content -Path $manifestPath -Encoding UTF8 -ErrorAction Stop
-        Write-Log "Manifest written: $($lines.Count) file(s) — $(Split-Path $BackupPath -Leaf)" -Level INFO
+        Write-Log "Manifest written: $($lines.Count) file(s)  -  $(Split-Path $BackupPath -Leaf)" -Level INFO
     }
     catch {
         Write-Log "Could not write manifest for $(Split-Path $BackupPath -Leaf): $_" -Level WARNING
@@ -766,9 +766,9 @@ function Test-ManifestIntegrity {
     .SYNOPSIS
         Verifies a backup folder's contents against its _manifest.sha256 file
     .OUTPUTS
-        $true  — all files present and checksums match
-        $false — one or more files missing or corrupt
-        $null  — no manifest exists (backup predates the manifest feature)
+        $true   -  all files present and checksums match
+        $false  -  one or more files missing or corrupt
+        $null   -  no manifest exists (backup predates the manifest feature)
     #>
     param([string]$BackupPath)
 
@@ -809,11 +809,11 @@ function Test-ManifestIntegrity {
 
     $folderLabel = Split-Path $BackupPath -Leaf
     if ($failures -eq 0) {
-        Write-Log "Manifest OK: $($entries.Count) file(s) verified — $folderLabel" -Level SUCCESS
+        Write-Log "Manifest OK: $($entries.Count) file(s) verified  -  $folderLabel" -Level SUCCESS
         return $true
     }
     else {
-        Write-Log "Manifest FAILED: $failures/$($entries.Count) file(s) corrupt or missing — $folderLabel" -Level ERROR
+        Write-Log "Manifest FAILED: $failures/$($entries.Count) file(s) corrupt or missing  -  $folderLabel" -Level ERROR
         return $false
     }
 }
@@ -825,9 +825,9 @@ function Get-RobocopyExitDescription {
         Codes 0-7 are success (bit flags); 8+ indicate errors.
     #>
     param([int]$ExitCode)
-    if ($ExitCode -ge 16) { return "FATAL ERROR — robocopy terminated abnormally" }
-    if ($ExitCode -ge 8)  { return "FAILURE — some files/directories could not be copied" }
-    if ($ExitCode -eq 0)  { return "No change — destination already up to date" }
+    if ($ExitCode -ge 16) { return "FATAL ERROR  -  robocopy terminated abnormally" }
+    if ($ExitCode -ge 8)  { return "FAILURE  -  some files/directories could not be copied" }
+    if ($ExitCode -eq 0)  { return "No change  -  destination already up to date" }
     $flags = @()
     if ($ExitCode -band 1) { $flags += "new/changed files copied" }
     if ($ExitCode -band 2) { $flags += "extra files/dirs found in destination" }
@@ -844,7 +844,7 @@ function Read-RobocopyLogSummary {
     param([string]$LogPath)
     if (-not (Test-Path $LogPath -PathType Leaf)) { return $null }
     try {
-        # Only read the last 30 lines — the summary is always at the end
+        # Only read the last 30 lines  -  the summary is always at the end
         $lines = Get-Content $LogPath -Tail 30 -ErrorAction SilentlyContinue
         $result = @{}
         foreach ($line in $lines) {
@@ -1268,7 +1268,7 @@ function Invoke-BackupToPeer {
     # This catches mid-job Tailscale disconnections early, with a clear error
     # instead of letting net use hang for 30 s and then fail with a generic OS error.
     if (-not (Test-TailscalePeerReachable -TailscaleIP $peerIP)) {
-        Write-Log "Tailscale cannot reach peer $peerLabel ($peerIP) — backup skipped" -Level ERROR
+        Write-Log "Tailscale cannot reach peer $peerLabel ($peerIP)  -  backup skipped" -Level ERROR
         return $false
     }
 
@@ -1328,7 +1328,7 @@ function Invoke-BackupToPeer {
         )
     }
     
-    # ── Source size ─────────────────────────────────────────────────────────────
+    # -- Source size -------------------------------------------------------------
     try {
         if ($Job.BackupType -eq 'F') {
             $srcItem      = Get-Item $Job.BackupObject -ErrorAction SilentlyContinue
@@ -1344,13 +1344,13 @@ function Invoke-BackupToPeer {
         $srcSizeGB   = [math]::Round($srcBytes / 1GB, 2)
         $srcSizeMB   = [math]::Round($srcBytes / 1MB, 1)
         $sizeDisplay = if ($srcSizeGB -ge 1) { "$srcSizeGB GB" } else { "$srcSizeMB MB" }
-        Write-Log "Source: $($Job.BackupObject) — $srcCount file(s), $sizeDisplay" -Level INFO
+        Write-Log "Source: $($Job.BackupObject)  -  $srcCount file(s), $sizeDisplay" -Level INFO
     }
     catch {
         Write-Log "Could not measure source size: $_" -Level WARNING
     }
 
-    # ── Robocopy ─────────────────────────────────────────────────────────────────
+    # -- Robocopy -----------------------------------------------------------------
     Write-Log "Running robocopy: $($Job.BackupObject) -> $destPath" -Level INFO
     $peerStartTime = Get-Date
     $exitCode      = -1
@@ -1363,7 +1363,7 @@ function Invoke-BackupToPeer {
                     -NoNewWindow -PassThru -ErrorAction Stop
         while (-not $proc.WaitForExit(60000)) {
             $elapsed = [int]((Get-Date) - $peerStartTime).TotalMinutes
-            Write-Log "Robocopy running — ${elapsed} min elapsed ($peerLabel)" -Level INFO
+            Write-Log "Robocopy running  -  ${elapsed} min elapsed ($peerLabel)" -Level INFO
         }
         $exitCode = $proc.ExitCode
     }
@@ -1374,7 +1374,7 @@ function Invoke-BackupToPeer {
 
     $peerDuration = [int]((Get-Date) - $peerStartTime).TotalSeconds
     $exitDesc     = Get-RobocopyExitDescription -ExitCode $exitCode
-    Write-Log "Robocopy finished in ${peerDuration}s — exit code $exitCode ($exitDesc)" -Level INFO
+    Write-Log "Robocopy finished in ${peerDuration}s  -  exit code $exitCode ($exitDesc)" -Level INFO
 
     # Parse robocopy log for detailed transfer stats
     $summary = Read-RobocopyLogSummary -LogPath $robocopyLog
@@ -1641,7 +1641,7 @@ function Get-DiskSpaceInfo {
             Write-Log "WARNING: Disk space critically low ($freePercent% free on $driveLetter`:)" -Level WARNING
         }
 
-        # Backup folder size — only if StoragePath is configured and exists
+        # Backup folder size  -  only if StoragePath is configured and exists
         $folderBytes = 0L
         if ($storagePath -and (Test-Path $storagePath)) {
             $measured = Get-ChildItem -Path $storagePath -Recurse -File -ErrorAction SilentlyContinue |
@@ -1872,7 +1872,7 @@ function Invoke-BackupJob {
         Write-Log "Unhandled error in backup job '$JobName': $_" -Level ERROR
     }
     finally {
-        # Always write final status and send heartbeat — even on exception or soft-kill.
+        # Always write final status and send heartbeat  -  even on exception or soft-kill.
         # (Hard kills by the OS scheduler will still interrupt this, but normal failures
         #  and PowerShell exceptions are guaranteed to report here.)
         Update-JobStatus -JobName $JobName -Status $finalStatus -DurationSeconds $durationSeconds -SizeBytes $sizeBytes
@@ -1900,7 +1900,7 @@ try {
         New-Item -Path $LogPath -ItemType Directory -Force | Out-Null
     }
 
-    # -UpdateOnly mode: just check/apply update and exit — no backup
+    # -UpdateOnly mode: just check/apply update and exit  -  no backup
     if ($UpdateOnly) {
         if (-not $SkipUpdateCheck) {
             Invoke-AutoUpdate

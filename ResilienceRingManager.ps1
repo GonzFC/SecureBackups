@@ -1568,7 +1568,7 @@ function Invoke-BackupVerification {
                     Write-Host "  [OK]  $label  ($($entries.Count) files)" -ForegroundColor Green
                     $totalOk++
                 } else {
-                    Write-Host "  [FAIL] $label  — $failures/$($entries.Count) files corrupt/missing" -ForegroundColor Red
+                    Write-Host "  [FAIL] $label   -  $failures/$($entries.Count) files corrupt/missing" -ForegroundColor Red
                     $totalFail++
                 }
             }

@@ -1446,7 +1446,7 @@ function Ensure-AutoUpdateTask {
             $principalOk = $existing.Principal.UserId -match 'SYSTEM'
             $hiddenOk    = $existing.Actions.Arguments -match 'WindowStyle Hidden'
             if ($principalOk -and $hiddenOk) { return }   # already correct
-            # Task exists but needs repair — remove and let Register-AutoUpdateTask recreate it
+            # Task exists but needs repair  -  remove and let Register-AutoUpdateTask recreate it
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
             Write-Log "Repairing $taskName (principal=$($existing.Principal.UserId), hidden=$hiddenOk)" -Level INFO
         }
@@ -2466,7 +2466,7 @@ function Invoke-Uninstall {
     }
 
     # Step 6: Schedule removal of application directory
-    # (cannot delete while running from it — schedule for a few seconds after exit)
+    # (cannot delete while running from it  -  schedule for a few seconds after exit)
     Write-Host "[ 6/6 ] Scheduling removal of application directory..." -ForegroundColor Yellow
     $appDir = "C:\VLABS_ResilienceRing"
     if (Test-Path $appDir) {

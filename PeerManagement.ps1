@@ -923,7 +923,7 @@ function Register-PeerWithRrmApi {
         $jobEnabled      = [bool]$(if ($job.Enabled         -ne $null) { $job.Enabled          | Select-Object -First 1 } else { $true })
 
         # When a single jobs.json entry covers multiple SQL instances, JobName/BackupType/BackupObject
-        # are stored as parallel arrays — expand each into its own API job so the dashboard shows them separately.
+        # are stored as parallel arrays  -  expand each into its own API job so the dashboard shows them separately.
         # PS5.1: use [array] type constraint to prevent pipeline from unwrapping single-element arrays
         # (without it, @("Community") gets unwrapped to "Community" and [0] returns the char 'C')
         [array]$jobNames   = if ($job.JobName    -is [array]) { $job.JobName    } else { @($job.JobName) }
@@ -982,13 +982,13 @@ function Register-PeerWithRrmApi {
             $config | Add-Member -NotePropertyName 'ProjectId'   -NotePropertyValue $projId          -Force
 
             # Always persist the URL that actually worked so it's explicit in the config.
-            # If the API returns a new canonical URL (migration from test→prod), adopt it
+            # If the API returns a new canonical URL (migration from test->prod), adopt it
             # automatically so next calls go to the right place without manual intervention.
             $canonicalUrl = if ($response.rrmApiUrl) { $response.rrmApiUrl.TrimEnd('/') } else { $apiUrl }
             $config | Add-Member -NotePropertyName 'RrmApiUrl' -NotePropertyValue $canonicalUrl -Force
 
             if ($response.rrmApiUrl -and $response.rrmApiUrl.TrimEnd('/') -ne $apiUrl) {
-                Write-Host "  [RRM] API URL updated: $apiUrl → $canonicalUrl" -ForegroundColor Cyan
+                Write-Host "  [RRM] API URL updated: $apiUrl -> $canonicalUrl" -ForegroundColor Cyan
             }
 
             Save-RingConfig -Config $config
@@ -1468,7 +1468,7 @@ function Show-StoragePeers {
     Write-Host "Checking $($peers.Count) peers in parallel..." -ForegroundColor Gray
     Write-Host ""
 
-    # Probe script executed in each runspace — no external function dependencies
+    # Probe script executed in each runspace  -  no external function dependencies
     $probeScript = {
         param($Peer, $CustomerCode)
 
@@ -1646,7 +1646,7 @@ function Update-PeerList {
     Write-Host "Step 2: Scanning peers for storage configuration (parallel)..." -ForegroundColor Yellow
     Write-Host ""
 
-    # Script executed in each runspace — no external function dependencies
+    # Script executed in each runspace  -  no external function dependencies
     $scanScript = {
         param($Peer, $CustomerCode, $SelfIP)
 
@@ -1767,7 +1767,7 @@ function Update-PeerList {
         $jobs.Add([PSCustomObject]@{ PS = $ps; Handle = $ps.BeginInvoke(); Peer = $peer })
     }
 
-    # Collect results as they finish — print immediately when each job completes
+    # Collect results as they finish  -  print immediately when each job completes
     $discoveredPeers = @()
     $skippedPeers    = @()
     $done            = 0
