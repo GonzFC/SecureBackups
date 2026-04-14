@@ -80,8 +80,11 @@ function Get-LocalRrVersion {
 
 function Invoke-AutoUpdate {
     try {
-        $versionUrl = "https://raw.githubusercontent.com/$script:RepoOwner/$script:RepoName/$script:RepoBranch/version.txt"
-        $latestVersion = (Invoke-RestMethod -Uri $versionUrl -UseBasicParsing -TimeoutSec 10).Trim()
+        # Use the GitHub Contents API instead of raw.githubusercontent.com to avoid CDN cache delays
+        $versionUrl    = "https://api.github.com/repos/$script:RepoOwner/$script:RepoName/contents/version.txt?ref=$script:RepoBranch"
+        $apiResponse   = Invoke-RestMethod -Uri $versionUrl -UseBasicParsing -TimeoutSec 10 `
+                             -Headers @{ 'Accept' = 'application/vnd.github.v3+json' }
+        $latestVersion = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($apiResponse.content)).Trim()
         $currentVersion = Get-LocalRrVersion
 
         if ($null -eq $currentVersion -or [Version]$latestVersion -le [Version]$currentVersion) { return }
