@@ -1638,25 +1638,29 @@ function Get-DiskSpaceInfo {
     #>
     $config = Get-RingConfig
 
-    # Determine which drive to report: prefer StoragePath, fall back to system drive
+    # StoragePath may be a UNC path (\\peer\share\...) - always report the local
+    # system drive for disk stats. UNC paths have no drive letter so Get-PSDrive
+    # would fail. BackupFolderBytes is only populated when StoragePath is local.
     $storagePath = if ($config -and $config.StoragePath) { $config.StoragePath } else { $null }
-    $drivePath   = if ($storagePath) { $storagePath } else { $env:SystemDrive + '\' }
+    $isUncStorage = $storagePath -and $storagePath.StartsWith('\\')
+
+    # Always measure the local system drive
+    $localDrive = $env:SystemDrive.TrimEnd(':')   # e.g. "C"
 
     try {
-        $driveLetter = (Split-Path -Qualifier $drivePath -ErrorAction Stop).TrimEnd(':')
-        $drive = Get-PSDrive -Name $driveLetter -ErrorAction Stop
+        $drive = Get-PSDrive -Name $localDrive -ErrorAction Stop
         $freeBytes   = [long]$drive.Free
         $usedBytes   = [long]$drive.Used
         $totalBytes  = $freeBytes + $usedBytes
         $freePercent = if ($totalBytes -gt 0) { [math]::Round(($freeBytes / $totalBytes) * 100, 1) } else { 0 }
 
         if ($freePercent -lt 10) {
-            Write-Log "WARNING: Disk space critically low ($freePercent% free on $driveLetter`:)" -Level WARNING
+            Write-Log "WARNING: Disk space critically low ($freePercent% free on ${localDrive}:)" -Level WARNING
         }
 
-        # Backup folder size  -  only if StoragePath is configured and exists
+        # Backup folder size - only when StoragePath is a local path and exists
         $folderBytes = 0L
-        if ($storagePath -and (Test-Path $storagePath)) {
+        if ($storagePath -and -not $isUncStorage -and (Test-Path $storagePath)) {
             $measured = Get-ChildItem -Path $storagePath -Recurse -File -ErrorAction SilentlyContinue |
                         Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue
             if ($measured -and $measured.Sum) { $folderBytes = [long]$measured.Sum }
