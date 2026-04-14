@@ -752,6 +752,58 @@ function Test-ManifestIntegrity {
     }
 }
 
+function Get-RobocopyExitDescription {
+    <#
+    .SYNOPSIS
+        Returns a human-readable description for a robocopy exit code.
+        Codes 0-7 are success (bit flags); 8+ indicate errors.
+    #>
+    param([int]$ExitCode)
+    if ($ExitCode -ge 16) { return "FATAL ERROR — robocopy terminated abnormally" }
+    if ($ExitCode -ge 8)  { return "FAILURE — some files/directories could not be copied" }
+    if ($ExitCode -eq 0)  { return "No change — destination already up to date" }
+    $flags = @()
+    if ($ExitCode -band 1) { $flags += "new/changed files copied" }
+    if ($ExitCode -band 2) { $flags += "extra files/dirs found in destination" }
+    if ($ExitCode -band 4) { $flags += "mismatched files/dirs" }
+    return ($flags -join '; ')
+}
+
+function Read-RobocopyLogSummary {
+    <#
+    .SYNOPSIS
+        Parses the summary footer of a robocopy /LOG: file and returns
+        structured stats (files copied, bytes, speed, elapsed time).
+    #>
+    param([string]$LogPath)
+    if (-not (Test-Path $LogPath -PathType Leaf)) { return $null }
+    try {
+        # Only read the last 30 lines — the summary is always at the end
+        $lines = Get-Content $LogPath -Tail 30 -ErrorAction SilentlyContinue
+        $result = @{}
+        foreach ($line in $lines) {
+            if ($line -match '^\s*Files\s*:\s*([\d,]+)\s+([\d,]+)') {
+                $result.TotalFiles  = ($Matches[1] -replace ',','')
+                $result.CopiedFiles = ($Matches[2] -replace ',','')
+            }
+            if ($line -match '^\s*Bytes\s*:\s*(\S+)\s+(\S+)') {
+                $result.TotalBytes  = $Matches[1]
+                $result.CopiedBytes = $Matches[2]
+            }
+            if ($line -match '^\s*Times\s*:\s*(\S+)') {
+                $result.Elapsed = $Matches[1]
+            }
+            if ($line -match '^\s*Speed\s*:\s*([\d,]+)\s+Bytes/sec') {
+                $speedBps          = [long]($Matches[1] -replace ',','')
+                $result.SpeedMBps  = [math]::Round($speedBps / 1MB, 1)
+            }
+        }
+        if ($result.TotalFiles -ne $null) { return [PSCustomObject]$result }
+        return $null
+    }
+    catch { return $null }
+}
+
 #endregion
 
 #region Tailscale Session
@@ -1210,20 +1262,68 @@ function Invoke-BackupToPeer {
         )
     }
     
-    Write-Log "Running robocopy: $($Job.BackupObject) -> $destPath" -Level INFO
-    
-    $robocopyCmd = "robocopy $($robocopyArgs -join ' ')"
+    # ── Source size ─────────────────────────────────────────────────────────────
     try {
-        Invoke-Expression $robocopyCmd | Out-Null
-        $exitCode = $LASTEXITCODE
-        Write-Log "Robocopy completed with exit code: $exitCode" -Level INFO
+        if ($Job.BackupType -eq 'F') {
+            $srcItem      = Get-Item $Job.BackupObject -ErrorAction SilentlyContinue
+            $srcCount     = if ($srcItem) { 1 } else { 0 }
+            $srcBytes     = if ($srcItem) { $srcItem.Length } else { 0 }
+        }
+        else {
+            $srcItems = @(Get-ChildItem $Job.BackupObject -Recurse -File -ErrorAction SilentlyContinue)
+            $srcCount = $srcItems.Count
+            $srcBytes = ($srcItems | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+            if (-not $srcBytes) { $srcBytes = 0 }
+        }
+        $srcSizeGB   = [math]::Round($srcBytes / 1GB, 2)
+        $srcSizeMB   = [math]::Round($srcBytes / 1MB, 1)
+        $sizeDisplay = if ($srcSizeGB -ge 1) { "$srcSizeGB GB" } else { "$srcSizeMB MB" }
+        Write-Log "Source: $($Job.BackupObject) — $srcCount file(s), $sizeDisplay" -Level INFO
+    }
+    catch {
+        Write-Log "Could not measure source size: $_" -Level WARNING
+    }
+
+    # ── Robocopy ─────────────────────────────────────────────────────────────────
+    Write-Log "Running robocopy: $($Job.BackupObject) -> $destPath" -Level INFO
+    $peerStartTime = Get-Date
+    $exitCode      = -1
+
+    try {
+        # Launch robocopy as a child process so we can log progress while it runs.
+        # WaitForExit(60000) blocks for up to 60 s; returns $false if still running,
+        # letting us write a heartbeat line to the log every minute.
+        $proc = Start-Process -FilePath "robocopy" -ArgumentList ($robocopyArgs -join ' ') `
+                    -NoNewWindow -PassThru -ErrorAction Stop
+        while (-not $proc.WaitForExit(60000)) {
+            $elapsed = [int]((Get-Date) - $peerStartTime).TotalMinutes
+            Write-Log "Robocopy running — ${elapsed} min elapsed ($peerLabel)" -Level INFO
+        }
+        $exitCode = $proc.ExitCode
     }
     catch {
         Write-Log "Robocopy exception: $_" -Level ERROR
         return $false
     }
-    
-    $success = ($exitCode -le 7)
+
+    $peerDuration = [int]((Get-Date) - $peerStartTime).TotalSeconds
+    $exitDesc     = Get-RobocopyExitDescription -ExitCode $exitCode
+    Write-Log "Robocopy finished in ${peerDuration}s — exit code $exitCode ($exitDesc)" -Level INFO
+
+    # Parse robocopy log for detailed transfer stats
+    $summary = Read-RobocopyLogSummary -LogPath $robocopyLog
+    if ($summary) {
+        $parts = @()
+        if ($summary.CopiedFiles -ne $null) { $parts += "files: $($summary.CopiedFiles)/$($summary.TotalFiles) copied" }
+        if ($summary.CopiedBytes)           { $parts += "bytes: $($summary.CopiedBytes)/$($summary.TotalBytes)" }
+        if ($summary.SpeedMBps -ne $null)   { $parts += "speed: $($summary.SpeedMBps) MB/s" }
+        if ($summary.Elapsed)               { $parts += "elapsed: $($summary.Elapsed)" }
+        if ($parts.Count -gt 0) {
+            Write-Log "Robocopy stats: $($parts -join ' | ')" -Level INFO
+        }
+    }
+
+    $success = ($exitCode -ge 0 -and $exitCode -le 7)
     
     if ($success) {
         # Verify integrity
@@ -1628,11 +1728,13 @@ function Invoke-BackupJob {
         return $false
     }
 
-    # These are set inside try/catch so the finally block can always write the final status.
-    $finalStatus    = 'Failed'
+    # Declared here so the finally block can always read them regardless of where
+    # execution was interrupted (normal exit, exception, or process kill).
+    $finalStatus     = 'Failed'
     $durationSeconds = 0
     $sizeBytes       = 0
     $success         = $false
+    $errorMsg        = $null
 
     try {
         $jobs = Get-Jobs
@@ -1677,18 +1779,10 @@ function Invoke-BackupJob {
 
         $durationSeconds = [int]((Get-Date) - $startTime).TotalSeconds
         $finalStatus     = if ($success) { "Success" } else { "Failed" }
-
-        # Send heartbeat to RRM API
-        $errorMsg = if (-not $success) { if ($script:LastBackupError) { $script:LastBackupError } else { "Backup failed - check log for details" } } else { $null }
-        $diskInfo = Get-DiskSpaceInfo
-        Send-RrmHeartbeat `
-            -JobName          $JobName `
-            -Status           $finalStatus `
-            -RanAt            $startTime.ToString('o') `
-            -DurationSeconds  $durationSeconds `
-            -SizeBytes        $sizeBytes `
-            -ErrorMessage     $errorMsg `
-            -DiskInfo         $diskInfo
+        $errorMsg        = if (-not $success) {
+                               if ($script:LastBackupError) { $script:LastBackupError }
+                               else { "Backup failed - check log for details" }
+                           } else { $null }
 
         # After successful backup, enforce ring policies on job master data
         if ($success) {
@@ -1703,15 +1797,28 @@ function Invoke-BackupJob {
     catch {
         $durationSeconds = [int]((Get-Date) - $startTime).TotalSeconds
         $finalStatus     = 'Failed'
+        $errorMsg        = if ($script:LastBackupError) { $script:LastBackupError } else { "$_" }
         Write-Log "Unhandled error in backup job '$JobName': $_" -Level ERROR
-        Send-RrmHeartbeat -JobName $JobName -Status $finalStatus -RanAt $startTime.ToString('o') `
-            -DurationSeconds $durationSeconds -SizeBytes $sizeBytes -ErrorMessage $script:LastBackupError `
-            -DiskInfo (Get-DiskSpaceInfo)
     }
     finally {
-        # Always write the final status — even if the job crashed or was interrupted.
+        # Always write final status and send heartbeat — even on exception or soft-kill.
+        # (Hard kills by the OS scheduler will still interrupt this, but normal failures
+        #  and PowerShell exceptions are guaranteed to report here.)
         Update-JobStatus -JobName $JobName -Status $finalStatus -DurationSeconds $durationSeconds -SizeBytes $sizeBytes
         Write-Log "=== Backup Job Completed: $JobName - $finalStatus (${durationSeconds}s) ===" -Level $(if ($finalStatus -eq 'Success') { 'SUCCESS' } else { 'ERROR' })
+        try {
+            Send-RrmHeartbeat `
+                -JobName         $JobName `
+                -Status          $finalStatus `
+                -RanAt           $startTime.ToString('o') `
+                -DurationSeconds $durationSeconds `
+                -SizeBytes       $sizeBytes `
+                -ErrorMessage    $errorMsg `
+                -DiskInfo        (Get-DiskSpaceInfo)
+        }
+        catch {
+            Write-Log "Could not send RRM heartbeat: $_" -Level WARNING
+        }
         Restore-TailscaleAfterBackup -Session $tailscaleSession
     }
 }
