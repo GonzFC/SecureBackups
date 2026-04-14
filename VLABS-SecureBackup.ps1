@@ -1397,15 +1397,14 @@ function Register-AutoUpdateTask {
 
         $action = New-ScheduledTaskAction `
             -Execute "PowerShell.exe" `
-            -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ExecutionScript`" -UpdateOnly"
+            -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ExecutionScript`" -UpdateOnly"
 
         # Run once now, repeat every hour indefinitely
         $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
             -RepetitionInterval (New-TimeSpan -Hours 1) `
             -RepetitionDuration (New-TimeSpan -Days 9999)
 
-        $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-        $principal  = New-ScheduledTaskPrincipal -UserId $currentUser -RunLevel Highest
+        $principal  = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
 
         $settings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries `
@@ -1436,13 +1435,25 @@ function Register-AutoUpdateTask {
 function Ensure-AutoUpdateTask {
     <#
     .SYNOPSIS
-        Silently registers the auto-update task if it doesn't already exist.
-        Called on each startup of the menu script.
+        Silently registers (or repairs) the auto-update task on each startup.
+        Recreates the task if it exists but runs as a non-SYSTEM account or
+        lacks -WindowStyle Hidden (both cause visible windows / failures).
     #>
     $taskName = "RR-AutoUpdate"
-    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-    if (-not $existing) {
+    try {
+        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existing) {
+            $principalOk = $existing.Principal.UserId -match 'SYSTEM'
+            $hiddenOk    = $existing.Actions.Arguments -match 'WindowStyle Hidden'
+            if ($principalOk -and $hiddenOk) { return }   # already correct
+            # Task exists but needs repair — remove and let Register-AutoUpdateTask recreate it
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            Write-Log "Repairing $taskName (principal=$($existing.Principal.UserId), hidden=$hiddenOk)" -Level INFO
+        }
         Register-AutoUpdateTask -Silent | Out-Null
+    }
+    catch {
+        Write-Log "Ensure-AutoUpdateTask failed (non-fatal): $_" -Level WARNING
     }
 }
 

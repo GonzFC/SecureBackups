@@ -1791,6 +1791,11 @@ function Invoke-BackupJob {
     if (-not $tailscaleSession.Ready) {
         Write-Log "Cannot start backup because Tailscale is unavailable: $($tailscaleSession.Reason)" -Level ERROR
         Update-JobStatus -JobName $JobName -Status "Failed" -DurationSeconds 0 -SizeBytes 0
+        try {
+            Send-RrmHeartbeat -JobName $JobName -Status "Failed" `
+                -RanAt (Get-Date).ToString('o') -DurationSeconds 0 -SizeBytes 0 `
+                -ErrorMessage "Tailscale unavailable: $($tailscaleSession.Reason)"
+        } catch {}
         return $false
     }
 
@@ -1928,5 +1933,15 @@ try {
 }
 catch {
     Write-Log "Fatal error: $_" -Level ERROR
+    # If a fatal error occurred before Invoke-BackupJob ran its own finally block,
+    # we must update the status here so the job doesn't stay stuck as "Running".
+    if ($JobName) {
+        try { Update-JobStatus -JobName $JobName -Status "Failed" -DurationSeconds 0 -SizeBytes 0 } catch {}
+        try {
+            Send-RrmHeartbeat -JobName $JobName -Status "Failed" `
+                -RanAt (Get-Date).ToString('o') -DurationSeconds 0 -SizeBytes 0 `
+                -ErrorMessage "Fatal startup error: $_"
+        } catch {}
+    }
     exit 1
 }
