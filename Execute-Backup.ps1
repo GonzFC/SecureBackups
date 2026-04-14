@@ -1896,10 +1896,9 @@ try {
         exit 1
     }
 
-    # Auto-update: check for new version and re-launch if updated
-    if (-not $SkipUpdateCheck) {
-        Invoke-AutoUpdate
-    }
+    # Auto-updates are handled exclusively by the RR-AutoUpdate scheduled task
+    # (hourly). We no longer check for updates before each backup job to avoid
+    # slow downloads or hangs blocking the actual backup.
 
     # Ensure the hourly auto-update task exists (registers silently if missing)
     Ensure-AutoUpdateTask
