@@ -1552,17 +1552,22 @@ function Invoke-BackupJobNow {
     Write-Host "`nStarting backup job: $($job.JobName)..." -ForegroundColor Yellow
     Write-Log "Manual execution requested for job: $($job.JobName)" -Level INFO
 
+    # Mark job as Running in local status so the menu reflects it immediately
+    Update-JobStatus -JobName $job.JobName -Status "Running"
+
     try {
-        # Execute asynchronously
-        $scriptBlock = {
-            param($ExecutionScript, $JobName)
-            & PowerShell.exe -NoProfile -ExecutionPolicy Bypass -File $ExecutionScript -JobName $JobName
-        }
+        # Use Start-Process (NOT Start-Job) so the backup runs as a fully
+        # independent process that survives even if this menu window is closed.
+        # -WindowStyle Hidden suppresses the PowerShell window flash.
+        $psArgs = "-NoProfile -NonInteractive -WindowStyle Hidden " +
+                  "-ExecutionPolicy Bypass -File `"$($script:ExecutionScript)`" " +
+                  "-JobName `"$($job.JobName)`""
 
-        Start-Job -ScriptBlock $scriptBlock -ArgumentList $ExecutionScript, $job.JobName | Out-Null
+        Start-Process -FilePath "PowerShell.exe" -ArgumentList $psArgs -WindowStyle Hidden
 
-        Write-Host "`nBackup job started in background." -ForegroundColor Green
-        Write-Host "Check the status view or logs for progress." -ForegroundColor Cyan
+        Write-Host "`nBackup job launched (running in background)." -ForegroundColor Green
+        Write-Host "It will report to the API when it completes." -ForegroundColor Cyan
+        Write-Host "Check option 2 or the logs for progress." -ForegroundColor Gray
     }
     catch {
         Write-Host "`nError starting backup job: $_" -ForegroundColor Red
