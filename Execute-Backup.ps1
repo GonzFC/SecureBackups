@@ -122,15 +122,25 @@ function Invoke-AutoUpdate {
         $gitRepo = Test-Path (Join-Path $script:InstallPath '.git')
 
         if ($gitAvailable -and $gitRepo) {
-            Push-Location $script:InstallPath
-            git fetch origin $script:RepoBranch 2>&1 | Out-Null
-            git reset --hard "origin/$script:RepoBranch" 2>&1 | Out-Null
-            Pop-Location
+            # Run git with a hard timeout so a slow/unresponsive remote can't
+            # block the backup indefinitely.
+            $gitTimeout = 60   # seconds
+            foreach ($gitArgs in @("fetch origin $script:RepoBranch", "reset --hard origin/$script:RepoBranch")) {
+                $proc = Start-Process -FilePath "git" -ArgumentList $gitArgs `
+                            -WorkingDirectory $script:InstallPath `
+                            -NoNewWindow -PassThru -ErrorAction SilentlyContinue
+                if ($proc -and -not $proc.WaitForExit($gitTimeout * 1000)) {
+                    $proc.Kill()
+                    Write-Log "Auto-update: git timed out after ${gitTimeout}s — skipping update" -Level WARNING
+                    return
+                }
+            }
         } else {
-            $zipUrl   = "https://github.com/$script:RepoOwner/$script:RepoName/archive/refs/heads/$script:RepoBranch.zip"
-            $zipPath  = Join-Path $env:TEMP 'RR_Update.zip'
-            $tmpPath  = Join-Path $env:TEMP 'RR_Update_Extract'
-            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+            $zipUrl  = "https://github.com/$script:RepoOwner/$script:RepoName/archive/refs/heads/$script:RepoBranch.zip"
+            $zipPath = Join-Path $env:TEMP 'RR_Update.zip'
+            $tmpPath = Join-Path $env:TEMP 'RR_Update_Extract'
+            # TimeoutSec ensures the download never hangs the backup indefinitely.
+            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 120
             if (Test-Path $tmpPath) { Remove-Item $tmpPath -Recurse -Force }
             Expand-Archive -Path $zipPath -DestinationPath $tmpPath -Force
             $srcFolder = Get-ChildItem $tmpPath -Directory | Select-Object -First 1
