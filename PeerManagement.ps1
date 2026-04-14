@@ -869,10 +869,22 @@ function Register-PeerWithRrmApi {
     if (-not $config) { return }
 
     # Use defaults for peers that haven't been configured with RRM yet
-    $defaultRrmUrl   = 'https://mercury.velociraptor-hoki.ts.net'
+    $defaultRrmUrl    = 'https://mercury.velociraptor-hoki.ts.net'
+    $legacyRrmUrl     = 'https://rr-api.ait.vlabs.network'
     $defaultProjectId = 1
 
-    $rrmUrl   = if ($config.RrmApiUrl)  { $config.RrmApiUrl }  else { $defaultRrmUrl }
+    $rrmUrl = if ($config.RrmApiUrl) { $config.RrmApiUrl } else { $defaultRrmUrl }
+
+    # Migrate legacy URL in ring-config.json on the spot
+    if ($rrmUrl.TrimEnd('/') -eq $legacyRrmUrl.TrimEnd('/')) {
+        $rrmUrl = $defaultRrmUrl
+        try {
+            $configFile = "C:\ProgramData\VLABS_ResilienceRing\ring-config.json"
+            $config | Add-Member -NotePropertyName 'RrmApiUrl' -NotePropertyValue $rrmUrl -Force
+            $config | ConvertTo-Json -Depth 10 | Set-Content $configFile -Encoding UTF8
+        } catch {}
+    }
+
     $projId   = if ($config.ProjectId -ne $null) { $config.ProjectId | Select-Object -First 1 } else { $defaultProjectId }
 
     $apiUrl   = $rrmUrl.TrimEnd('/')
