@@ -733,6 +733,34 @@ function Restore-TailscaleAfterBackup {
     & $tailscaleExe down 2>&1 | Out-Null
 }
 
+function Test-TailscalePeerReachable {
+    <#
+    .SYNOPSIS
+        Verifies that a destination peer's Tailscale IP responds before attempting SMB
+    .DESCRIPTION
+        Runs "tailscale ping" with a short timeout. Returns $true only when a pong
+        is received, which confirms both that the local Tailscale session is alive
+        and that the remote peer is online on the Tailscale network.
+    #>
+    param(
+        [string]$TailscaleIP,
+        [int]$TimeoutSeconds = 5
+    )
+
+    $tailscaleExe = Get-TailscaleExePath
+    if (-not $tailscaleExe) {
+        return $false
+    }
+
+    try {
+        $output = & $tailscaleExe ping --timeout="${TimeoutSeconds}s" --c=1 $TailscaleIP 2>&1
+        return ($output -match 'pong from')
+    }
+    catch {
+        return $false
+    }
+}
+
 #endregion
 
 #region SMB Connection
@@ -1021,6 +1049,14 @@ function Invoke-BackupToPeer {
     
     $peerLabel = if ($Peer.Location) { $Peer.Location } elseif ($Peer.Hostname) { $Peer.Hostname } else { $peerIP }
     Write-Log "Backing up to peer: $peerLabel ($peerIP) - Type: $RetentionType" -Level INFO
+
+    # Verify Tailscale can reach this peer before attempting SMB.
+    # This catches mid-job Tailscale disconnections early, with a clear error
+    # instead of letting net use hang for 30 s and then fail with a generic OS error.
+    if (-not (Test-TailscalePeerReachable -TailscaleIP $peerIP)) {
+        Write-Log "Tailscale cannot reach peer $peerLabel ($peerIP) — backup skipped" -Level ERROR
+        return $false
+    }
 
     # Connect to peer
     if (-not (Connect-ToPeer -TailscaleIP $peerIP -CustomerCode $customerCode)) {
