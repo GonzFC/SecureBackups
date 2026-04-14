@@ -1441,6 +1441,140 @@ function Publish-RingPoliciesToPeers {
     Read-Host "`nPress Enter to continue"
 }
 
+function Invoke-BackupVerification {
+    <#
+    .SYNOPSIS
+        Verifies SHA256 manifests for all backup snapshots on a selected peer
+    #>
+    if (-not $script:ActiveRing) {
+        Write-Host "No ring selected!" -ForegroundColor Red
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    Clear-Host
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "  BACKUP INTEGRITY VERIFICATION" -ForegroundColor Cyan
+    Write-Host "  $($script:ActiveRing.Name)" -ForegroundColor Cyan
+    Write-Host "========================================`n" -ForegroundColor Cyan
+
+    $peers = @(Get-TailscalePeersByTag -Tag $script:ActiveRing.Tag | Where-Object { $_.Online -and -not $_.IsSelf })
+
+    if ($peers.Count -eq 0) {
+        Write-Host "No online storage peers found." -ForegroundColor Yellow
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    Write-Host "Online peers:" -ForegroundColor Yellow
+    for ($i = 0; $i -lt $peers.Count; $i++) {
+        Write-Host "  $($i+1). $($peers[$i].HostName) ($($peers[$i].TailscaleIP))" -ForegroundColor White
+    }
+    Write-Host "  A. All peers" -ForegroundColor White
+    Write-Host ""
+    $peerChoice = Read-Host "Select peer"
+
+    $selected = if ($peerChoice.ToUpper() -eq 'A') {
+        $peers
+    } elseif ($peerChoice -match '^\d+$') {
+        $idx = [int]$peerChoice - 1
+        if ($idx -ge 0 -and $idx -lt $peers.Count) { @($peers[$idx]) } else { $null }
+    } else { $null }
+
+    if (-not $selected) {
+        Write-Host "Invalid selection." -ForegroundColor Red
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    Write-Host ""
+    $totalOk = 0; $totalFail = 0; $totalOld = 0
+
+    foreach ($peer in $selected) {
+        Write-Host "Peer: $($peer.HostName)" -ForegroundColor Cyan
+        $sharePath = "\\$($peer.TailscaleIP)\RR_Backups"
+        $password  = Get-RRMServicePassword -CustomerCode $script:ActiveRing.CustomerCode
+
+        $netResult = cmd /c "net use `"$sharePath`" /user:RR_Service `"$password`" 2>&1"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  Cannot connect: $netResult" -ForegroundColor Red
+            continue
+        }
+
+        try {
+            $customerPath = Join-Path $sharePath $script:ActiveRing.CustomerCode.ToUpper()
+            if (-not (Test-Path $customerPath -ErrorAction SilentlyContinue)) {
+                Write-Host "  No backups found for this ring." -ForegroundColor Yellow
+                continue
+            }
+
+            # Walk structure: customerPath\location\appname\type\snapshot
+            $snapshots = @()
+            foreach ($loc in @(Get-ChildItem $customerPath -Directory -ErrorAction SilentlyContinue)) {
+                foreach ($app in @(Get-ChildItem $loc.FullName -Directory -ErrorAction SilentlyContinue)) {
+                    foreach ($type in @(Get-ChildItem $app.FullName -Directory -ErrorAction SilentlyContinue)) {
+                        $snapshots += @(Get-ChildItem $type.FullName -Directory -ErrorAction SilentlyContinue)
+                    }
+                }
+            }
+
+            if ($snapshots.Count -eq 0) {
+                Write-Host "  No backup snapshots found." -ForegroundColor Yellow
+                continue
+            }
+
+            Write-Host "  Checking $($snapshots.Count) snapshot(s)..." -ForegroundColor Gray
+
+            foreach ($snap in ($snapshots | Sort-Object FullName)) {
+                $manifestPath = Join-Path $snap.FullName "_manifest.sha256"
+                $label = "$($snap.Parent.Parent.Name)\$($snap.Parent.Name)\$($snap.Name)"
+
+                if (-not (Test-Path $manifestPath -PathType Leaf)) {
+                    Write-Host "  [---] $label" -ForegroundColor DarkGray
+                    $totalOld++
+                    continue
+                }
+
+                $entries = @(Get-Content $manifestPath -ErrorAction SilentlyContinue |
+                             Where-Object { $_ -match '^[0-9A-Fa-f]{64}\s+\S' })
+
+                $failures = 0
+                foreach ($line in $entries) {
+                    $parts   = $line -split '\s+', 2
+                    $expected = $parts[0].ToUpper()
+                    $filePath = Join-Path $snap.FullName $parts[1]
+
+                    if (-not (Test-Path $filePath -PathType Leaf)) {
+                        $failures++
+                        continue
+                    }
+                    $actual = (Get-FileHash -Path $filePath -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+                    if ($actual -ne $expected) { $failures++ }
+                }
+
+                if ($failures -eq 0) {
+                    Write-Host "  [OK]  $label  ($($entries.Count) files)" -ForegroundColor Green
+                    $totalOk++
+                } else {
+                    Write-Host "  [FAIL] $label  — $failures/$($entries.Count) files corrupt/missing" -ForegroundColor Red
+                    $totalFail++
+                }
+            }
+        }
+        finally {
+            net use $sharePath /delete 2>&1 | Out-Null
+        }
+
+        Write-Host ""
+    }
+
+    Write-Host "----------------------------------------" -ForegroundColor Gray
+    $summaryColor = if ($totalFail -gt 0) { 'Red' } elseif ($totalOk -gt 0) { 'Green' } else { 'Gray' }
+    Write-Host "  OK: $totalOk   FAILED: $totalFail   No manifest (pre-1.9.63): $totalOld" -ForegroundColor $summaryColor
+    Write-Host ""
+    Read-Host "Press Enter to continue"
+}
+
 #endregion
 
 #region Ring Selector
@@ -1555,6 +1689,10 @@ function Show-MainMenu {
     Write-Host "   7. Ring Policies" -ForegroundColor White
 
     Write-Host ""
+    Write-Host " MAINTENANCE" -ForegroundColor Yellow
+    Write-Host "   8. Verify Backup Integrity" -ForegroundColor White
+
+    Write-Host ""
     Write-Host " SYSTEM" -ForegroundColor Yellow
     Write-Host "   U. Check for Updates" -ForegroundColor White
     Write-Host "   0. Exit (to switch ring)" -ForegroundColor White
@@ -1575,6 +1713,7 @@ function Start-MainLoop {
             "5" { Show-AllRings }
             "6" { Invoke-RingRescan }
             "7" { Show-RingPolicies }
+            "8" { Invoke-BackupVerification }
             "U" { Invoke-RRMUpdate }
             "0" {
                 Write-Host "`nExiting Ring Manager..." -ForegroundColor Cyan

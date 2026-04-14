@@ -656,6 +656,99 @@ function Test-BackupIntegrity {
     }
 }
 
+function Write-BackupManifest {
+    <#
+    .SYNOPSIS
+        Writes a SHA256 checksum manifest alongside a completed backup folder
+    .DESCRIPTION
+        Creates _manifest.sha256 inside the backup folder.
+        Format: "SHA256HASH  relative\path\to\file" (one line per file).
+        Used later by Test-ManifestIntegrity to verify the backup before a restore.
+    #>
+    param(
+        [string]$BackupPath
+    )
+
+    $manifestPath = Join-Path $BackupPath "_manifest.sha256"
+
+    try {
+        $files = Get-ChildItem -Path $BackupPath -File -Recurse -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -ne '_manifest.sha256' } |
+                 Sort-Object FullName
+
+        $lines = @(foreach ($file in $files) {
+            $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+            if ($hash) {
+                $relativePath = $file.FullName.Substring($BackupPath.Length).TrimStart('\')
+                "$hash  $relativePath"
+            }
+        })
+
+        $lines | Set-Content -Path $manifestPath -Encoding UTF8 -ErrorAction Stop
+        Write-Log "Manifest written: $($lines.Count) file(s) — $(Split-Path $BackupPath -Leaf)" -Level INFO
+    }
+    catch {
+        Write-Log "Could not write manifest for $(Split-Path $BackupPath -Leaf): $_" -Level WARNING
+    }
+}
+
+function Test-ManifestIntegrity {
+    <#
+    .SYNOPSIS
+        Verifies a backup folder's contents against its _manifest.sha256 file
+    .OUTPUTS
+        $true  — all files present and checksums match
+        $false — one or more files missing or corrupt
+        $null  — no manifest exists (backup predates the manifest feature)
+    #>
+    param([string]$BackupPath)
+
+    $manifestPath = Join-Path $BackupPath "_manifest.sha256"
+
+    if (-not (Test-Path $manifestPath -PathType Leaf)) {
+        return $null
+    }
+
+    $entries = @(Get-Content $manifestPath -ErrorAction SilentlyContinue |
+                 Where-Object { $_ -match '^[0-9A-Fa-f]{64}\s+\S' })
+
+    if ($entries.Count -eq 0) {
+        Write-Log "Manifest is empty or unreadable: $manifestPath" -Level WARNING
+        return $null
+    }
+
+    $failures = 0
+
+    foreach ($line in $entries) {
+        $parts    = $line -split '\s+', 2
+        $expected = $parts[0].ToUpper()
+        $relPath  = $parts[1]
+        $filePath = Join-Path $BackupPath $relPath
+
+        if (-not (Test-Path $filePath -PathType Leaf)) {
+            Write-Log "MISSING: $relPath" -Level ERROR
+            $failures++
+            continue
+        }
+
+        $actual = (Get-FileHash -Path $filePath -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+        if ($actual -ne $expected) {
+            Write-Log "CORRUPT: $relPath (expected $expected, got $actual)" -Level ERROR
+            $failures++
+        }
+    }
+
+    $folderLabel = Split-Path $BackupPath -Leaf
+    if ($failures -eq 0) {
+        Write-Log "Manifest OK: $($entries.Count) file(s) verified — $folderLabel" -Level SUCCESS
+        return $true
+    }
+    else {
+        Write-Log "Manifest FAILED: $failures/$($entries.Count) file(s) corrupt or missing — $folderLabel" -Level ERROR
+        return $false
+    }
+}
+
 #endregion
 
 #region Tailscale Session
@@ -1146,7 +1239,10 @@ function Invoke-BackupToPeer {
         }
         else {
             Write-Log "Backup to $($Peer.Hostname) completed and verified" -Level SUCCESS
-            
+
+            # Write SHA256 manifest so integrity can be re-verified at restore time
+            Write-BackupManifest -BackupPath $destPath
+
             # Apply retention cleanup ONLY after successful AND verified backup
             Invoke-RetentionCleanup -BasePath $basePath -AppName $appName `
                 -MonthlyRetention $Job.RetentionMonthly `
