@@ -280,15 +280,20 @@ function Ensure-AutoUpdateTask {
 }
 
 function Invoke-RrmUrlMigration {
-    # Silently migrate old RRM URL to the new server if still present in config
+    # Silently migrate any known old/test RRM URL to the current production server
+    $legacyUrls = @(
+        'https://rr-api.ait.vlabs.network',
+        'https://api-test.mmi.lat/resilience-ring',
+        'https://api-test.mmi.lat'
+    )
     try {
         $configFile = Join-Path $script:ConfigPath 'ring-config.json'
         if (-not (Test-Path $configFile)) { return }
         $config = Get-Content $configFile -Raw | ConvertFrom-Json
-        if ($config.RrmApiUrl -eq $script:OldRrmUrl) {
+        if ($config.RrmApiUrl -in $legacyUrls) {
             $config.RrmApiUrl = $script:NewRrmUrl
             $config | ConvertTo-Json -Depth 10 | Set-Content $configFile -Encoding UTF8
-            Write-Log "Auto-migration: RrmApiUrl updated to $script:NewRrmUrl" -Level INFO
+            Write-Log "Auto-migration: RrmApiUrl updated from $($config.RrmApiUrl) to $script:NewRrmUrl" -Level INFO
         }
     }
     catch {
