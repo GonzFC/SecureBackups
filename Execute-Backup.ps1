@@ -168,9 +168,11 @@ function Invoke-AutoUpdate {
             $failed     = 0
             foreach ($item in ($fileList | Where-Object { $_.type -eq 'file' -and $_.download_url })) {
                 try {
-                    $resp     = Invoke-WebRequest -Uri $item.download_url -UseBasicParsing -TimeoutSec 30
                     $destPath = Join-Path $script:InstallPath $item.name
-                    [System.IO.File]::WriteAllBytes($destPath, $resp.Content)
+                    # Use -OutFile to write directly to disk -- avoids the PS 5.1 issue
+                    # where Invoke-WebRequest returns .Content as string for some files,
+                    # causing WriteAllBytes to fail with a type conversion error.
+                    Invoke-WebRequest -Uri $item.download_url -UseBasicParsing -TimeoutSec 30 -OutFile $destPath
                     $downloaded++
                 }
                 catch {
