@@ -169,10 +169,23 @@ function Invoke-AutoUpdate {
             foreach ($item in ($fileList | Where-Object { $_.type -eq 'file' -and $_.download_url })) {
                 try {
                     $destPath = Join-Path $script:InstallPath $item.name
-                    # Use -OutFile to write directly to disk -- avoids the PS 5.1 issue
-                    # where Invoke-WebRequest returns .Content as string for some files,
-                    # causing WriteAllBytes to fail with a type conversion error.
-                    Invoke-WebRequest -Uri $item.download_url -UseBasicParsing -TimeoutSec 30 -OutFile $destPath
+                    if ($item.name -match '\.ps1$') {
+                        # PS1 files must be saved as UTF-16 LE with BOM so Windows
+                        # PowerShell 5.1 parses them correctly (avoids parse errors
+                        # with subexpressions like $($var.Property) inside strings).
+                        $response = Invoke-WebRequest -Uri $item.download_url -UseBasicParsing -TimeoutSec 30
+                        $utf8NoBom = [System.Text.Encoding]::UTF8
+                        $utf16Le   = [System.Text.Encoding]::Unicode  # UTF-16 LE with BOM
+                        $text      = $utf8NoBom.GetString($response.Content)
+                        $bom       = $utf16Le.GetPreamble()
+                        $bytes     = $utf16Le.GetBytes($text)
+                        $all       = New-Object byte[] ($bom.Length + $bytes.Length)
+                        [System.Buffer]::BlockCopy($bom,   0, $all, 0,            $bom.Length)
+                        [System.Buffer]::BlockCopy($bytes, 0, $all, $bom.Length,  $bytes.Length)
+                        [System.IO.File]::WriteAllBytes($destPath, $all)
+                    } else {
+                        Invoke-WebRequest -Uri $item.download_url -UseBasicParsing -TimeoutSec 30 -OutFile $destPath
+                    }
                     $downloaded++
                 }
                 catch {
