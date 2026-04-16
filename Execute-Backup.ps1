@@ -234,6 +234,40 @@ function Invoke-AutoUpdate {
     }
 }
 
+function Repair-Ps1Encodings {
+    # Self-healing: ensure every .ps1 file in the install directory is UTF-16 LE with BOM.
+    # Peers that auto-updated while running an old Execute-Backup.ps1 (without the UTF-16
+    # conversion code) ended up with UTF-8 files, which cause Windows PowerShell 5.1 parse
+    # errors on subexpressions like $($var.Property) inside strings.
+    # This function silently re-encodes any such files so they work correctly.
+    try {
+        $ps1Files = Get-ChildItem -Path $script:InstallPath -Filter '*.ps1' -File -ErrorAction SilentlyContinue
+        foreach ($file in $ps1Files) {
+            try {
+                $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+                # Skip files that already have UTF-16 LE BOM (FF FE)
+                if ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) { continue }
+                # Re-read as UTF-8 and save as UTF-16 LE with BOM
+                $text    = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+                $utf16Le = [System.Text.Encoding]::Unicode
+                $bom     = $utf16Le.GetPreamble()
+                $encoded = $utf16Le.GetBytes($text)
+                $all     = New-Object byte[] ($bom.Length + $encoded.Length)
+                [System.Buffer]::BlockCopy($bom,     0, $all, 0,           $bom.Length)
+                [System.Buffer]::BlockCopy($encoded, 0, $all, $bom.Length, $encoded.Length)
+                [System.IO.File]::WriteAllBytes($file.FullName, $all)
+                Write-Log "Repair-Ps1Encodings: re-encoded $($file.Name) to UTF-16 LE" -Level INFO
+            }
+            catch {
+                Write-Log "Repair-Ps1Encodings: could not re-encode $($file.Name): $_" -Level WARNING
+            }
+        }
+    }
+    catch {
+        Write-Log "Repair-Ps1Encodings failed (non-fatal): $_" -Level WARNING
+    }
+}
+
 function Ensure-AutoUpdateTask {
     # Registers (or repairs) the RR-AutoUpdate scheduled task.
     # Always uses SYSTEM as the principal so the task works regardless of
@@ -1963,6 +1997,11 @@ try {
     if (-not (Test-Path $LogPath)) {
         New-Item -Path $LogPath -ItemType Directory -Force | Out-Null
     }
+
+    # Self-healing: re-encode any UTF-8 .ps1 files to UTF-16 LE.
+    # Fixes peers whose files were downloaded by an older Execute-Backup.ps1
+    # that lacked the UTF-16 conversion — runs silently on every execution.
+    Repair-Ps1Encodings
 
     # -UpdateOnly mode: just check/apply update and exit  -  no backup
     if ($UpdateOnly) {
