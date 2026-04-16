@@ -1321,7 +1321,7 @@ function New-ScheduledBackupTask {
             Write-Log "Removed existing scheduled task: $($Job.TaskName)" -Level INFO
         }
 
-        # Create task action — hidden window so the PowerShell console never appears
+        # Create task action -- hidden window so the PowerShell console never appears
         $action = New-ScheduledTaskAction -Execute "PowerShell.exe" `
             -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ExecutionScript`" -JobName `"$($Job.JobName)`""
 
@@ -1471,7 +1471,7 @@ function Ensure-BackupTasksHidden {
             if (-not $task) { continue }
             $hiddenOk = $task.Actions.Arguments -match 'WindowStyle Hidden'
             if (-not $hiddenOk) {
-                Write-Log "Repairing task $($job.TaskName) — adding -WindowStyle Hidden" -Level INFO
+                Write-Log "Repairing task $($job.TaskName) -- adding -WindowStyle Hidden" -Level INFO
                 Register-JobScheduledTask -Job $job | Out-Null
             }
         }

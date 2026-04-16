@@ -2000,7 +2000,7 @@ try {
 
     # Self-healing: re-encode any UTF-8 .ps1 files to UTF-16 LE.
     # Fixes peers whose files were downloaded by an older Execute-Backup.ps1
-    # that lacked the UTF-16 conversion — runs silently on every execution.
+    # that lacked the UTF-16 conversion -- runs silently on every execution.
     Repair-Ps1Encodings
 
     # -UpdateOnly mode: just check/apply update and exit  -  no backup
