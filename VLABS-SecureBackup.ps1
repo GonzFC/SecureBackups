@@ -1321,9 +1321,9 @@ function New-ScheduledBackupTask {
             Write-Log "Removed existing scheduled task: $($Job.TaskName)" -Level INFO
         }
 
-        # Create task action
+        # Create task action — hidden window so the PowerShell console never appears
         $action = New-ScheduledTaskAction -Execute "PowerShell.exe" `
-            -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$ExecutionScript`" -JobName `"$($Job.JobName)`""
+            -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ExecutionScript`" -JobName `"$($Job.JobName)`""
 
         # Create triggers based on frequency
         $triggers = @()
@@ -1454,6 +1454,30 @@ function Ensure-AutoUpdateTask {
     }
     catch {
         Write-Log "Ensure-AutoUpdateTask failed (non-fatal): $_" -Level WARNING
+    }
+}
+
+function Ensure-BackupTasksHidden {
+    <#
+    .SYNOPSIS
+        Repairs any existing backup scheduled tasks that are missing -WindowStyle Hidden,
+        so the PowerShell console is never visible to the end user during execution.
+    #>
+    try {
+        $jobs = @(Get-Jobs)
+        foreach ($job in $jobs) {
+            if (-not $job.TaskName) { continue }
+            $task = Get-ScheduledTask -TaskName $job.TaskName -ErrorAction SilentlyContinue
+            if (-not $task) { continue }
+            $hiddenOk = $task.Actions.Arguments -match 'WindowStyle Hidden'
+            if (-not $hiddenOk) {
+                Write-Log "Repairing task $($job.TaskName) — adding -WindowStyle Hidden" -Level INFO
+                Register-JobScheduledTask -Job $job | Out-Null
+            }
+        }
+    }
+    catch {
+        Write-Log "Ensure-BackupTasksHidden failed (non-fatal): $_" -Level WARNING
     }
 }
 
@@ -2564,6 +2588,9 @@ if ($isDirectExecution -and -not $env:RESILIENCE_RING_IMPORT) {
 
         # Ensure the hourly auto-update task exists (silent, non-blocking)
         Ensure-AutoUpdateTask
+
+        # Repair any backup tasks missing -WindowStyle Hidden (silent, non-blocking)
+        Ensure-BackupTasksHidden
 
         Start-Sleep -Seconds 1
         Start-MainLoop
