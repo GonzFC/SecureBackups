@@ -1822,11 +1822,13 @@ function Send-RrmHeartbeat {
 
     $diskPayload = $null
     if ($DiskInfo) {
+        $localQuotaGB = (Get-RingConfig).QuotaGB
         $diskPayload = @{
             totalBytes        = $DiskInfo.TotalBytes
             freeBytes         = $DiskInfo.FreeBytes
             freePercent       = $DiskInfo.FreePercent
             backupFolderBytes = $DiskInfo.BackupFolderBytes
+            quotaBytes        = if ($localQuotaGB -gt 0) { [int64]($localQuotaGB * 1GB) } else { $null }
         }
     }
 
