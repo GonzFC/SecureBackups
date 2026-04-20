@@ -1921,6 +1921,34 @@ function Invoke-BackupJob {
             return $false
         }
 
+        # Pre-flight: ping every destination peer via Tailscale before starting.
+        # Ensures Tailscale is actually routing traffic, not just locally connected.
+        # If ALL peers are unreachable the job fails early with a clear message.
+        # If SOME are unreachable a warning is logged and the job continues with the
+        # reachable peers (the per-destination check in Invoke-BackupToPeer handles them).
+        if ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) {
+            $preOkCount   = 0
+            $preFailNames = @()
+            foreach ($dest in @($job.PeerDestinations)) {
+                $destLabel = if ($dest.Location) { $dest.Location } `
+                             elseif ($dest.Hostname) { $dest.Hostname } `
+                             else { $dest.TailscaleIP }
+                if ($dest.TailscaleIP -and (Test-TailscalePeerReachable -TailscaleIP $dest.TailscaleIP)) {
+                    $preOkCount++
+                } else {
+                    $preFailNames += $destLabel
+                }
+            }
+            if ($preFailNames.Count -gt 0) {
+                Write-Log "Pre-flight: $($preFailNames.Count) peer(s) not reachable via Tailscale: $($preFailNames -join ', ')" -Level WARNING
+            }
+            if ($preOkCount -eq 0) {
+                $errorMsg = "Tailscale unreachable: no destination peers responded to ping ($($preFailNames -join ', '))"
+                Write-Log "Pre-flight failed -- $errorMsg" -Level ERROR
+                return $false  # finally block sends heartbeat + updates status
+            }
+        }
+
         Update-JobStatus -JobName $JobName -Status "Running"
 
         if ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) {
