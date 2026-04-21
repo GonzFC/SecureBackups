@@ -162,14 +162,22 @@ if (-not $gitAvailable) {
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractPath)
 
-        # Move to final location
+        # Copy to final location (copy-over instead of delete+move so the
+        # directory is never removed -- avoids "in use" errors when a script
+        # or scheduled task is running from the install folder).
         $extractedFolder = Get-ChildItem $extractPath -Directory | Select-Object -First 1
 
-        if (Test-Path $script:InstallPath) {
-            Remove-Item -Path $script:InstallPath -Recurse -Force
+        if (-not (Test-Path $script:InstallPath)) {
+            New-Item -Path $script:InstallPath -ItemType Directory -Force | Out-Null
         }
 
-        Move-Item -Path $extractedFolder.FullName -Destination $script:InstallPath
+        Get-ChildItem -Path $extractedFolder.FullName -File | ForEach-Object {
+            Copy-Item -Path $_.FullName -Destination $script:InstallPath -Force
+        }
+        Get-ChildItem -Path $extractedFolder.FullName -Directory | ForEach-Object {
+            $destDir = Join-Path $script:InstallPath $_.Name
+            Copy-Item -Path $_.FullName -Destination $destDir -Recurse -Force
+        }
 
         # Cleanup
         Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
