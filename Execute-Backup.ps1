@@ -1143,25 +1143,42 @@ function Get-PeerQuotaGB {
 function Get-PeerStorageUsageBytes {
     param(
         [string]$TailscaleIP,
-        [string]$CustomerCode
+        [string]$CustomerCode,
+        [int]$TimeoutSeconds = 60
     )
-    
+
     $sharePath = "\\$TailscaleIP\$(Get-RRShareName)"
-    
+
     try {
         $connected = Connect-ToPeer -TailscaleIP $TailscaleIP -CustomerCode $CustomerCode
         if (-not $connected) {
             return $null
         }
-        
-        $usedBytes = 0
-        if (Test-Path $sharePath) {
-            $usedBytes = (Get-ChildItem $sharePath -Recurse -ErrorAction SilentlyContinue |
-                          Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+
+        if (-not (Test-Path $sharePath)) {
+            return [int64]0
         }
-        
-        $result = if ($usedBytes) { $usedBytes } else { 0 }
-        return [int64]$result
+
+        # Run the recursive scan in a background job so it can be cancelled
+        # if the SMB share is slow or the peer has a large amount of data.
+        $scanJob = Start-Job -ScriptBlock {
+            param($path)
+            (Get-ChildItem $path -Recurse -ErrorAction SilentlyContinue |
+             Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+        } -ArgumentList $sharePath
+
+        $finished = Wait-Job -Job $scanJob -Timeout $TimeoutSeconds
+        if (-not $finished) {
+            Stop-Job  -Job $scanJob -ErrorAction SilentlyContinue
+            Remove-Job -Job $scanJob -Force -ErrorAction SilentlyContinue
+            Write-Log "Storage usage scan timed out for peer $TailscaleIP after ${TimeoutSeconds}s -- quota check skipped" -Level WARNING
+            return $null
+        }
+
+        $usedBytes = Receive-Job -Job $scanJob
+        Remove-Job -Job $scanJob -Force -ErrorAction SilentlyContinue
+
+        return [int64](if ($usedBytes) { $usedBytes } else { 0 })
     }
     catch {
         return $null
