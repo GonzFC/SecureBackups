@@ -693,46 +693,54 @@ function Invoke-RetentionCleanup {
     if ($RecentRetention -lt 1) { $RecentRetention = 1 }
     
     Write-Log "Applying retention policy: $MonthlyRetention monthly, $WeeklyRetention weekly, $RecentRetention recent" -Level INFO
-    
-    if (-not (Test-Path $BasePath)) { return }
-    
+
+    if (-not (Test-Path $BasePath)) { return [int64]0 }
+
     $allFolders = Get-ChildItem -Path $BasePath -Directory -ErrorAction SilentlyContinue |
                   Where-Object { $_.Name -like "$AppName-*" } |
                   Sort-Object Name -Descending
-    
+
     # Separate by type
     $monthlyFolders = $allFolders | Where-Object { $_.Name -match '-monthly$' }
-    $weeklyFolders = $allFolders | Where-Object { $_.Name -match '-weekly$' }
-    $recentFolders = $allFolders | Where-Object { $_.Name -notmatch '-(monthly|weekly)$' }
-    
+    $weeklyFolders  = $allFolders | Where-Object { $_.Name -match '-weekly$' }
+    $recentFolders  = $allFolders | Where-Object { $_.Name -notmatch '-(monthly|weekly)$' }
+
+    # Helper: measure a folder then delete it; returns its byte count.
+    $deletedBytes = [int64]0
+    $deleteFolder = {
+        param($folder)
+        $bytes = (Get-ChildItem $folder.FullName -Recurse -ErrorAction SilentlyContinue |
+                  Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+        Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        return [int64](if ($bytes) { $bytes } else { 0 })
+    }
+
     # Delete excess monthly (0 = delete all monthly)
     if ($monthlyFolders.Count -gt $MonthlyRetention) {
-        $toDelete = $monthlyFolders | Select-Object -Skip $MonthlyRetention
-        foreach ($folder in $toDelete) {
+        foreach ($folder in ($monthlyFolders | Select-Object -Skip $MonthlyRetention)) {
             Write-Log "Deleting old monthly backup: $($folder.Name)" -Level INFO
-            Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            $deletedBytes += & $deleteFolder $folder
         }
     }
-    
+
     # Delete excess weekly (0 = delete all weekly)
     if ($weeklyFolders.Count -gt $WeeklyRetention) {
-        $toDelete = $weeklyFolders | Select-Object -Skip $WeeklyRetention
-        foreach ($folder in $toDelete) {
+        foreach ($folder in ($weeklyFolders | Select-Object -Skip $WeeklyRetention)) {
             Write-Log "Deleting old weekly backup: $($folder.Name)" -Level INFO
-            Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            $deletedBytes += & $deleteFolder $folder
         }
     }
-    
+
     # Delete excess recent (always >= 1)
     if ($recentFolders.Count -gt $RecentRetention) {
-        $toDelete = $recentFolders | Select-Object -Skip $RecentRetention
-        foreach ($folder in $toDelete) {
+        foreach ($folder in ($recentFolders | Select-Object -Skip $RecentRetention)) {
             Write-Log "Deleting old recent backup: $($folder.Name)" -Level INFO
-            Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            $deletedBytes += & $deleteFolder $folder
         }
     }
-    
-    Write-Log "Retention cleanup completed" -Level SUCCESS
+
+    Write-Log "Retention cleanup completed -- freed $([math]::Round($deletedBytes/1MB,1)) MB" -Level SUCCESS
+    return $deletedBytes
 }
 
 #endregion
@@ -1105,6 +1113,39 @@ function Disconnect-FromPeer {
 
 #endregion
 
+#region Usage Cache
+# A single file ".rr-usage" at the share root stores the last known total bytes.
+# Reading it is instant (one network file read) vs. scanning the whole share.
+# The cache is written after every backup with an incremental delta so it never
+# needs a full rescan after the first time.
+
+function Get-ShareUsageCachePath {
+    param([string]$TailscaleIP)
+    return "\\$TailscaleIP\$(Get-RRShareName)\.rr-usage"
+}
+
+function Read-PeerUsageCache {
+    param([string]$TailscaleIP)
+    $path = Get-ShareUsageCachePath -TailscaleIP $TailscaleIP
+    try {
+        if (Test-Path $path -ErrorAction SilentlyContinue) {
+            $val = (Get-Content $path -Raw -ErrorAction Stop).Trim()
+            if ($val -match '^\d+$') { return [int64]$val }
+        }
+    } catch {}
+    return $null
+}
+
+function Write-PeerUsageCache {
+    param([string]$TailscaleIP, [int64]$Bytes)
+    $path = Get-ShareUsageCachePath -TailscaleIP $TailscaleIP
+    try {
+        [string]$Bytes | Set-Content $path -Force -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+#endregion
+
 #region Quota Enforcement
 
 function Get-BackupSourceSizeBytes {
@@ -1151,16 +1192,21 @@ function Get-PeerStorageUsageBytes {
 
     try {
         $connected = Connect-ToPeer -TailscaleIP $TailscaleIP -CustomerCode $CustomerCode
-        if (-not $connected) {
-            return $null
+        if (-not $connected) { return $null }
+
+        # Fast path: read cached value written by the last backup (single file, instant).
+        $cached = Read-PeerUsageCache -TailscaleIP $TailscaleIP
+        if ($null -ne $cached) {
+            Write-Log "Peer $TailscaleIP: quota usage from cache -- $([math]::Round($cached/1GB,2)) GB" -Level INFO
+            return $cached
         }
 
-        if (-not (Test-Path $sharePath)) {
-            return [int64]0
-        }
+        # No cache yet: full recursive scan (slow, runs only the very first time).
+        # Result is written to .rr-usage so future runs use the fast path.
+        Write-Log "Peer $TailscaleIP: no usage cache found -- running initial full scan (one-time)" -Level INFO
 
-        # Run the recursive scan in a background job so it can be cancelled
-        # if the SMB share is slow or the peer has a large amount of data.
+        if (-not (Test-Path $sharePath)) { return [int64]0 }
+
         $scanJob = Start-Job -ScriptBlock {
             param($path)
             (Get-ChildItem $path -Recurse -ErrorAction SilentlyContinue |
@@ -1171,21 +1217,20 @@ function Get-PeerStorageUsageBytes {
         if (-not $finished) {
             Stop-Job  -Job $scanJob -ErrorAction SilentlyContinue
             Remove-Job -Job $scanJob -Force -ErrorAction SilentlyContinue
-            Write-Log "Storage usage scan timed out for peer $TailscaleIP after ${TimeoutSeconds}s -- quota check skipped" -Level WARNING
+            Write-Log "Initial usage scan timed out for peer $TailscaleIP after ${TimeoutSeconds}s -- quota check skipped" -Level WARNING
             return $null
         }
 
         $usedBytes = Receive-Job -Job $scanJob
         Remove-Job -Job $scanJob -Force -ErrorAction SilentlyContinue
+        $result = [int64](if ($usedBytes) { $usedBytes } else { 0 })
 
-        return [int64](if ($usedBytes) { $usedBytes } else { 0 })
+        Write-PeerUsageCache -TailscaleIP $TailscaleIP -Bytes $result
+        Write-Log "Peer $TailscaleIP: initial usage scan complete -- $([math]::Round($result/1GB,2)) GB, cache written" -Level INFO
+        return $result
     }
-    catch {
-        return $null
-    }
-    finally {
-        Disconnect-FromPeer -TailscaleIP $TailscaleIP
-    }
+    catch { return $null }
+    finally { Disconnect-FromPeer -TailscaleIP $TailscaleIP }
 }
 
 function Get-PeerTypeFolder {
@@ -1522,11 +1567,23 @@ function Invoke-BackupToPeer {
             # Write SHA256 manifest so integrity can be re-verified at restore time
             Write-BackupManifest -BackupPath $destPath
 
-            # Apply retention cleanup ONLY after successful AND verified backup
-            Invoke-RetentionCleanup -BasePath $basePath -AppName $appName `
+            # Apply retention cleanup ONLY after successful AND verified backup.
+            # Capture bytes freed so we can update the usage cache accurately.
+            $retentionFreedBytes = Invoke-RetentionCleanup -BasePath $basePath -AppName $appName `
                 -MonthlyRetention $Job.RetentionMonthly `
                 -WeeklyRetention $Job.RetentionWeekly `
                 -RecentRetention $Job.RetentionRecent
+
+            # Update .rr-usage cache: old + bytes_written - bytes_freed_by_retention.
+            # srcBytes is the source size (= what was just written to destPath).
+            # Using cached old value avoids a full rescan of the share.
+            $oldCache = Read-PeerUsageCache -TailscaleIP $peerIP
+            if ($null -ne $oldCache) {
+                $writtenBytes  = if ($srcBytes) { [int64]$srcBytes } else { [int64]0 }
+                $newCache      = [math]::Max(0, $oldCache + $writtenBytes - $retentionFreedBytes)
+                Write-PeerUsageCache -TailscaleIP $peerIP -Bytes $newCache
+                Write-Log "Usage cache updated: $([math]::Round($oldCache/1GB,2)) GB + $([math]::Round($writtenBytes/1MB,1)) MB written - $([math]::Round($retentionFreedBytes/1MB,1)) MB freed = $([math]::Round($newCache/1GB,2)) GB" -Level INFO
+            }
         }
     }
     else {
