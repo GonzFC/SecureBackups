@@ -994,10 +994,27 @@ function Ensure-TailscaleForBackup {
     }
 
     Write-Log "Tailscale is disconnected -- bringing it up for this backup job..." -Level INFO
-    & $tailscaleExe up --accept-dns=false 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "tailscale up command returned non-zero exit code" -Level ERROR
-        $result.Reason = "tailscale up failed"
+    $upTimeoutSec = 30
+    $upJob = Start-Job -ScriptBlock {
+        param($exe)
+        & $exe up --accept-dns=false 2>&1 | Out-Null
+        return $LASTEXITCODE
+    } -ArgumentList $tailscaleExe
+
+    $upFinished = Wait-Job -Job $upJob -Timeout $upTimeoutSec
+    if (-not $upFinished) {
+        Stop-Job   -Job $upJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $upJob -Force  -ErrorAction SilentlyContinue
+        Write-Log "tailscale up timed out after ${upTimeoutSec}s -- node may need re-authentication" -Level ERROR
+        $result.Reason = "tailscale up timed out (re-auth required?)"
+        return $result
+    }
+
+    $upExitCode = Receive-Job -Job $upJob
+    Remove-Job -Job $upJob -Force -ErrorAction SilentlyContinue
+    if ($upExitCode -ne 0) {
+        Write-Log "tailscale up command returned non-zero exit code: $upExitCode" -Level ERROR
+        $result.Reason = "tailscale up failed (exit $upExitCode)"
         return $result
     }
 
