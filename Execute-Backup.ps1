@@ -2062,7 +2062,14 @@ function Invoke-BackupJob {
                 $destLabel = if ($dest.Location) { $dest.Location } `
                              elseif ($dest.Hostname) { $dest.Hostname } `
                              else { $dest.TailscaleIP }
-                if ($dest.TailscaleIP -and (Test-TailscalePeerReachable -TailscaleIP $dest.TailscaleIP)) {
+                $peerOk = $dest.TailscaleIP -and (Test-TailscalePeerReachable -TailscaleIP $dest.TailscaleIP)
+                if (-not $peerOk) {
+                    # Retry once -- node map may not have synced right after tailscale up
+                    Write-Log "Pre-flight: $destLabel not responding, retrying in 5s..." -Level INFO
+                    Start-Sleep -Seconds 5
+                    $peerOk = $dest.TailscaleIP -and (Test-TailscalePeerReachable -TailscaleIP $dest.TailscaleIP)
+                }
+                if ($peerOk) {
                     Write-Log "Pre-flight OK: $destLabel ($($dest.TailscaleIP))" -Level INFO
                     $preOkCount++
                 } else {
