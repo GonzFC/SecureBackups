@@ -988,27 +988,32 @@ function Ensure-TailscaleForBackup {
     
     $tsStatus = Test-TailscaleInstalled
     if ($tsStatus.Connected) {
+        Write-Log "Tailscale is already connected" -Level INFO
         $result.Ready = $true
         return $result
     }
-    
-    Write-Log "Tailscale is disconnected. Bringing it up for this backup job..." -Level INFO
+
+    Write-Log "Tailscale is disconnected -- bringing it up for this backup job..." -Level INFO
     & $tailscaleExe up --accept-dns=false 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
+        Write-Log "tailscale up command returned non-zero exit code" -Level ERROR
         $result.Reason = "tailscale up failed"
         return $result
     }
-    
+
+    Write-Log "Waiting for Tailscale to reach connected state..." -Level INFO
     for ($attempt = 0; $attempt -lt 10; $attempt++) {
         Start-Sleep -Seconds 1
         $tsStatus = Test-TailscaleInstalled
         if ($tsStatus.Connected) {
+            Write-Log "Tailscale connected successfully" -Level INFO
             $result.Ready = $true
             $result.StartedByJob = $true
             return $result
         }
     }
-    
+
+    Write-Log "Tailscale did not reach connected state after 10 seconds" -Level ERROR
     $result.Reason = "Tailscale did not reach connected state"
     return $result
 }
@@ -1031,8 +1036,9 @@ function Restore-TailscaleAfterBackup {
         return
     }
     
-    Write-Log "Stopping Tailscale after backup job completion..." -Level INFO
+    Write-Log "Disconnecting Tailscale after backup job completion..." -Level INFO
     & $tailscaleExe down 2>&1 | Out-Null
+    Write-Log "Tailscale disconnected" -Level INFO
 }
 
 function Test-TailscalePeerReachable {
@@ -1078,7 +1084,12 @@ function Connect-ToPeer {
 
     # Check if already connected (use -SimpleMatch to avoid regex issues with backslashes)
     $existing = net use 2>$null | Select-String -SimpleMatch $sharePath
-    if ($existing) { return $true }
+    if ($existing) {
+        Write-Log "SMB share already connected: $sharePath" -Level INFO
+        return $true
+    }
+
+    Write-Log "Connecting to SMB share: $sharePath" -Level INFO
 
     # Get service account password
     $password = Get-RingServicePassword -CustomerCode $CustomerCode
@@ -1096,11 +1107,17 @@ function Connect-ToPeer {
         Stop-Job  -Job $connectJob -ErrorAction SilentlyContinue
         Remove-Job -Job $connectJob -Force -ErrorAction SilentlyContinue
         net use $sharePath /delete 2>$null | Out-Null
+        Write-Log "SMB connection timed out after ${TimeoutSeconds}s: $sharePath" -Level ERROR
         return $false
     }
 
     $exitCode = Receive-Job -Job $connectJob
     Remove-Job -Job $connectJob -Force -ErrorAction SilentlyContinue
+    if ($exitCode -eq 0) {
+        Write-Log "SMB share connected: $sharePath" -Level INFO
+    } else {
+        Write-Log "SMB connection failed (net use exit $exitCode): $sharePath" -Level ERROR
+    }
     return ($exitCode -eq 0)
 }
 
@@ -1404,19 +1421,17 @@ function Invoke-BackupToPeer {
     $customerCode = if ($Job.CustomerCode) { $Job.CustomerCode } else { (Get-RingConfig).CustomerCode }
     
     $peerLabel = if ($Peer.Location) { $Peer.Location } elseif ($Peer.Hostname) { $Peer.Hostname } else { $peerIP }
-    Write-Log "Backing up to peer: $peerLabel ($peerIP) - Type: $RetentionType" -Level INFO
+    Write-Log "--- Peer: $peerLabel ($peerIP) | Type: $RetentionType ---" -Level INFO
 
-    # Verify Tailscale can reach this peer before attempting SMB.
-    # This catches mid-job Tailscale disconnections early, with a clear error
-    # instead of letting net use hang for 30 s and then fail with a generic OS error.
+    Write-Log "Verifying Tailscale connectivity to $peerLabel ($peerIP)..." -Level INFO
     if (-not (Test-TailscalePeerReachable -TailscaleIP $peerIP)) {
-        Write-Log "Tailscale cannot reach peer $peerLabel ($peerIP)  -  backup skipped" -Level ERROR
+        Write-Log "Tailscale cannot reach peer $peerLabel ($peerIP) -- backup skipped" -Level ERROR
         return $false
     }
+    Write-Log "Tailscale ping OK: $peerLabel ($peerIP)" -Level INFO
 
-    # Connect to peer
     if (-not (Connect-ToPeer -TailscaleIP $peerIP -CustomerCode $customerCode)) {
-        Write-Log "Failed to connect to peer: $peerLabel ($peerIP)" -Level ERROR
+        Write-Log "Failed to connect to SMB share on peer: $peerLabel ($peerIP)" -Level ERROR
         return $false
     }
     
@@ -1961,6 +1976,7 @@ function Invoke-BackupJob {
     $startTime = Get-Date
     Write-Log "=== Backup Job Started: $JobName ===" -Level INFO
 
+    Write-Log "Checking Tailscale status..." -Level INFO
     $tailscaleSession = Ensure-TailscaleForBackup
     if (-not $tailscaleSession.Ready) {
         Write-Log "Cannot start backup because Tailscale is unavailable: $($tailscaleSession.Reason)" -Level ERROR
@@ -2001,6 +2017,7 @@ function Invoke-BackupJob {
         # If SOME are unreachable a warning is logged and the job continues with the
         # reachable peers (the per-destination check in Invoke-BackupToPeer handles them).
         if ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) {
+            Write-Log "Pre-flight check: pinging $($job.PeerDestinations.Count) destination peer(s)..." -Level INFO
             $preOkCount   = 0
             $preFailNames = @()
             foreach ($dest in @($job.PeerDestinations)) {
@@ -2008,8 +2025,10 @@ function Invoke-BackupJob {
                              elseif ($dest.Hostname) { $dest.Hostname } `
                              else { $dest.TailscaleIP }
                 if ($dest.TailscaleIP -and (Test-TailscalePeerReachable -TailscaleIP $dest.TailscaleIP)) {
+                    Write-Log "Pre-flight OK: $destLabel ($($dest.TailscaleIP))" -Level INFO
                     $preOkCount++
                 } else {
+                    Write-Log "Pre-flight FAIL: $destLabel ($($dest.TailscaleIP)) did not respond" -Level WARNING
                     $preFailNames += $destLabel
                 }
             }
@@ -2021,8 +2040,10 @@ function Invoke-BackupJob {
                 Write-Log "Pre-flight failed -- $errorMsg" -Level ERROR
                 return $false  # finally block sends heartbeat + updates status
             }
+            Write-Log "Pre-flight passed: $preOkCount/$($job.PeerDestinations.Count) peer(s) reachable" -Level INFO
         }
 
+        Write-Log "Starting backup execution..." -Level INFO
         Update-JobStatus -JobName $JobName -Status "Running"
 
         if ($job.PeerDestinations -and $job.PeerDestinations.Count -gt 0) {
@@ -2091,6 +2112,9 @@ function Invoke-BackupJob {
         }
         catch {
             Write-Log "Could not send RRM heartbeat: $_" -Level WARNING
+        }
+        if ($tailscaleSession -and $tailscaleSession.StartedByJob -and $tailscaleSession.Mode -eq 'PerJob') {
+            Write-Log "Restoring Tailscale state (PerJob mode)..." -Level INFO
         }
         Restore-TailscaleAfterBackup -Session $tailscaleSession
     }
