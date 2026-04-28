@@ -995,15 +995,22 @@ function Ensure-TailscaleForBackup {
 
     Write-Log "Tailscale is disconnected -- bringing it up for this backup job..." -Level INFO
     $upTimeoutMs = 30000
+    $upExitCode  = -1
+    $upOutput    = ""
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName        = $tailscaleExe
-        $psi.Arguments       = "up --accept-dns=false"
-        $psi.UseShellExecute = $false
-        $psi.CreateNoWindow  = $true
+        $psi.FileName               = $tailscaleExe
+        $psi.Arguments              = "up"
+        $psi.UseShellExecute        = $false
+        $psi.CreateNoWindow         = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
 
         $upProc = [System.Diagnostics.Process]::Start($psi)
         if (-not $upProc) { throw "failed to start tailscale up process" }
+
+        $stdoutTask = $upProc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $upProc.StandardError.ReadToEndAsync()
 
         if (-not $upProc.WaitForExit($upTimeoutMs)) {
             try { $upProc.Kill() } catch {}
@@ -1014,6 +1021,7 @@ function Ensure-TailscaleForBackup {
         }
 
         $upExitCode = $upProc.ExitCode
+        $upOutput   = ($stdoutTask.Result + " " + $stderrTask.Result).Trim()
         $upProc.Dispose()
     }
     catch {
@@ -1021,6 +1029,8 @@ function Ensure-TailscaleForBackup {
         $result.Reason = "tailscale up exception: $_"
         return $result
     }
+
+    if ($upOutput) { Write-Log "tailscale up output: $upOutput" -Level INFO }
 
     if ($upExitCode -ne 0) {
         Write-Log "tailscale up failed with exit code: $upExitCode" -Level ERROR
