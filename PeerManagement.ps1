@@ -234,24 +234,35 @@ function Connect-RingShare {
     param(
         [string]$TailscaleHostname,
         [string]$TailscaleIP,
-        [string]$CustomerCode
+        [string]$CustomerCode,
+        [int]$TimeoutSeconds = 30
     )
-    
+
     $password = Get-RingServicePassword -CustomerCode $CustomerCode
     $sharePath = "\\$TailscaleIP\$(Get-RRShareName)"
-    
+
     # Remove any existing connection to this share
     net use $sharePath /delete 2>$null | Out-Null
-    
-    # Connect with credentials
-    $result = net use $sharePath /user:$(Get-RRServiceUser) $password 2>&1
-    
-    if ($LASTEXITCODE -eq 0) {
-        return $true
-    }
-    else {
+
+    # Connect with timeout via Start-Job so a slow/unreachable peer does not
+    # block the caller indefinitely (net use has no built-in timeout).
+    $connectJob = Start-Job -ScriptBlock {
+        param($path, $user, $pass)
+        net use $path /user:$user $pass 2>&1 | Out-Null
+        return $LASTEXITCODE
+    } -ArgumentList $sharePath, (Get-RRServiceUser), $password
+
+    $finished = Wait-Job -Job $connectJob -Timeout $TimeoutSeconds
+    if (-not $finished) {
+        Stop-Job  -Job $connectJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $connectJob -Force -ErrorAction SilentlyContinue
+        net use $sharePath /delete 2>$null | Out-Null
         return $false
     }
+
+    $exitCode = Receive-Job -Job $connectJob
+    Remove-Job -Job $connectJob -Force -ErrorAction SilentlyContinue
+    return ($exitCode -eq 0)
 }
 
 function Disconnect-RingShare {

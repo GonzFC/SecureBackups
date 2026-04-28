@@ -1388,7 +1388,7 @@ function Resolve-ExecutionPeers {
         }
     }
     
-    $availablePeers = @(Get-AvailableStoragePeers)
+    $availablePeers = try { @(Get-AvailableStoragePeers) } catch { @() }
     $availableByIp = @{}
     foreach ($peer in $availablePeers) {
         $availableByIp[$peer.TailscaleIP] = $peer
