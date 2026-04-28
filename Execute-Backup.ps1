@@ -1043,7 +1043,8 @@ function Ensure-TailscaleForBackup {
         Start-Sleep -Seconds 1
         $tsStatus = Test-TailscaleInstalled
         if ($tsStatus.Connected) {
-            Write-Log "Tailscale connected successfully" -Level INFO
+            Write-Log "Tailscale connected successfully -- waiting 3s for route propagation..." -Level INFO
+            Start-Sleep -Seconds 3
             $result.Ready = $true
             $result.StartedByJob = $true
             return $result
