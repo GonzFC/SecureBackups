@@ -1231,13 +1231,13 @@ function Get-PeerStorageUsageBytes {
         # Fast path: read cached value written by the last backup (single file, instant).
         $cached = Read-PeerUsageCache -TailscaleIP $TailscaleIP
         if ($null -ne $cached) {
-            Write-Log "Peer $TailscaleIP: quota usage from cache -- $([math]::Round($cached/1GB,2)) GB" -Level INFO
+            Write-Log "Peer ${TailscaleIP}: quota usage from cache -- $([math]::Round($cached/1GB,2)) GB" -Level INFO
             return $cached
         }
 
         # No cache yet: full recursive scan (slow, runs only the very first time).
         # Result is written to .rr-usage so future runs use the fast path.
-        Write-Log "Peer $TailscaleIP: no usage cache found -- running initial full scan (one-time)" -Level INFO
+        Write-Log "Peer ${TailscaleIP}: no usage cache found -- running initial full scan (one-time)" -Level INFO
 
         if (-not (Test-Path $sharePath)) { return [int64]0 }
 
@@ -1260,7 +1260,7 @@ function Get-PeerStorageUsageBytes {
         $result = [int64](if ($usedBytes) { $usedBytes } else { 0 })
 
         Write-PeerUsageCache -TailscaleIP $TailscaleIP -Bytes $result
-        Write-Log "Peer $TailscaleIP: initial usage scan complete -- $([math]::Round($result/1GB,2)) GB, cache written" -Level INFO
+        Write-Log "Peer ${TailscaleIP}: initial usage scan complete -- $([math]::Round($result/1GB,2)) GB, cache written" -Level INFO
         return $result
     }
     catch { return $null }
