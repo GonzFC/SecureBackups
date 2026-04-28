@@ -568,7 +568,7 @@ function Test-TailscaleInstalled {
     
     try {
         $status = & $tailscaleExe status --json 2>$null | ConvertFrom-Json
-        $isConnected = $null -ne $status.Self.TailscaleIPs
+        $isConnected = $status.BackendState -eq 'Running'
         return @{ 
             Installed = $true
             Running = $true
