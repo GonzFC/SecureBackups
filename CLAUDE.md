@@ -87,9 +87,33 @@ Si se registra con el usuario actual y ese usuario no tiene sesion activa (ej. s
 ### Heartbeat en `finally`, no solo en el camino feliz
 `Send-RrmHeartbeat` esta en el bloque `finally` de `Invoke-BackupJob` para garantizar que la API siempre reciba el resultado final. Ademas, los paths de falla tempranos (Tailscale unavailable, crash antes de `Invoke-BackupJob`) tambien mandan heartbeat explicitamente. Sin esto, la API queda mostrando el job como "Running" indefinidamente.
 
+### `$VAR:` en strings de PowerShell es un PS drive prefix
+`"conectado a $TailscaleIP: peer"` hace que PS5.1 interprete `$TailscaleIP:` como acceso a un PS drive llamado `TailscaleIP`, devolviendo string vacia. Resultado: log lines con IPs en blanco o ParseException. Siempre usar `${TailscaleIP}` cuando el nombre de variable va inmediatamente seguido de `:`.
+
+### `Test-TailscaleInstalled`: `Self.TailscaleIPs` no indica conectividad
+`tailscale status --json` siempre incluye `Self.TailscaleIPs` (IP persistente del nodo en la red Tailscale) incluso cuando Tailscale esta desconectado. Usarlo como check de conectividad siempre devuelve `Connected=$true`. El check correcto es `BackendState -eq 'Running'`. El bug causaba que el modo PerJob nunca conectara Tailscale (creia que ya estaba conectado).
+
+### `tailscale up` via `Start-Job` falla con exit code 1
+`Start-Job` en PS 5.1 pierde el token elevado del proceso padre. Tailscale necesita acceso al named pipe de Windows que requiere elevacion. Mismo patron que robocopy: usar `ProcessStartInfo` con `UseShellExecute=$false` y `WaitForExit()`. `Start-Job` tambien tiene este problema con cualquier herramienta que requiera elevacion.
+
+### Node map sync delay tras `tailscale up` en modo PerJob
+`BackendState` llega a `Running` antes de que el mapa de nodos se sincronice con los peers. El primer `tailscale ping` inmediatamente despues puede fallar aunque el peer sea alcanzable (responde en ~50ms en pruebas reales). Solucion en `Invoke-BackupJob`: si el pre-flight ping falla, esperar 5s y reintentar una vez antes de marcar el peer como inalcanzable.
+
+### `Connect-RingShare` no tenia timeout
+A diferencia de `Connect-ToPeer` (que tenia timeout de 30s via `Start-Job`), `Connect-RingShare` no tenia timeout. En `Get-AvailableStoragePeers`, que escanea todos los peers del anillo para encontrar alternativas, cada peer inalcanzable bloqueaba la ejecucion indefinidamente. Fix: mismo patron `Start-Job + Wait-Job -Timeout 30` que `Connect-ToPeer`.
+
+### `Test-PeerQuotaCapacity` rechazaba peers cuando el scan de uso fallaba
+`Get-PeerStorageUsageBytes` hace un full scan de la carpeta en la primera ejecucion (sin cache `.rr-usage`), que puede exceder el timeout de 60s en shares con muchos archivos. Cuando devuelve `$null`, `Test-PeerQuotaCapacity` devolvia `Allowed=$false`, disparando `Resolve-ExecutionPeers` a escanear todo el anillo buscando peers alternativos (30+ peers). Fix: devolver `Allowed=$true` con WARNING cuando el uso no se puede determinar. La siguiente ejecucion tendra el cache `.rr-usage` y el check sera instantaneo.
+
+### PerJob mode: Tailscale no se desconectaba si ya estaba conectado al inicio
+`Ensure-TailscaleForBackup` solo seteaba `StartedByJob=$true` cuando el job conectaba Tailscale desde cero. Si Tailscale ya estaba conectado (leftover de backup anterior o conexion manual), `StartedByJob` quedaba `$false` y `Restore-TailscaleAfterBackup` no desconectaba al final. Fix: en modo PerJob, setear `StartedByJob=$true` incluso cuando Tailscale ya estaba conectado. AlwaysOn no se ve afectado: `Restore-TailscaleAfterBackup` verifica `$Session.Mode -ne 'PerJob'` antes de desconectar.
+
+### Modo PerJob Tailscale: configuracion y comportamiento esperado
+`ring-config.json` acepta `"TailscaleMode": "PerJob"` (default: `"AlwaysOn"`). En PerJob, `Ensure-TailscaleForBackup` conecta Tailscale al inicio del job y `Restore-TailscaleAfterBackup` lo desconecta al final (incluso si ya estaba conectado). El pre-flight de pings se hace DESPUES de conectar. Los bugs v1.9.98-v1.9.106 corrigieron una cascada de 7 fallos que hacian que PerJob nunca funcionara correctamente.
+
 ## Versiones actuales
 
-- Peer agent: ver `version.txt` (actualmente 1.9.80)
+- Peer agent: ver `version.txt` (actualmente 1.9.106)
 - RRM: ver `rrm-version.txt` (actualmente 1.2.6)
 
 ## Como probar cambios
