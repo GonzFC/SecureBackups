@@ -990,6 +990,9 @@ function Ensure-TailscaleForBackup {
     if ($tsStatus.Connected) {
         Write-Log "Tailscale is already connected" -Level INFO
         $result.Ready = $true
+        if ($result.Mode -eq 'PerJob') {
+            $result.StartedByJob = $true
+        }
         return $result
     }
 
