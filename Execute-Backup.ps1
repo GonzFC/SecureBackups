@@ -1340,10 +1340,10 @@ function Test-PeerQuotaCapacity {
     
     $usedBytes = Get-PeerStorageUsageBytes -TailscaleIP $Peer.TailscaleIP -CustomerCode $customerCode
     if ($null -eq $usedBytes) {
-        Write-Log "Could not determine current usage for peer $($Peer.Hostname); skipping peer." -Level WARNING
+        Write-Log "Could not determine current usage for peer $($Peer.Hostname); allowing backup without quota check." -Level WARNING
         return [PSCustomObject]@{
-            Allowed = $false
-            Reason = "Usage unavailable"
+            Allowed = $true
+            Descriptor = (New-PeerExecutionDescriptor -Peer $Peer -Job $Job -QuotaGB $quotaGB)
         }
     }
     
