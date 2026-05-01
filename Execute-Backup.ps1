@@ -2011,6 +2011,68 @@ function Send-RrmHeartbeat {
 
 #region Main
 
+function Invoke-MissedJobCheck {
+    <#
+    .SYNOPSIS
+        Launches any enabled job that has exceeded its expected run interval.
+    .DESCRIPTION
+        Called from -UpdateOnly mode after the auto-update check. For each enabled
+        job, computes the threshold as (Frequency + 2 hours). If LastRun is older
+        than the threshold -- or the job has never run -- and the job is not already
+        Running, it launches Execute-Backup.ps1 -JobName as a fully independent
+        process (Start-Process -WindowStyle Hidden), exactly like a manual launch.
+
+        The -UpdateOnly task exits immediately after this call; the catch-up jobs
+        run in separate processes and do not block or affect the hourly task.
+    #>
+    $scriptFile = Join-Path $script:InstallPath 'Execute-Backup.ps1'
+    if (-not (Test-Path $scriptFile)) { return }
+
+    $jobs = Get-Jobs
+    if (-not $jobs -or $jobs.Count -eq 0) { return }
+
+    $statusTable = Get-JobsStatus
+    $now = Get-Date
+
+    foreach ($job in $jobs) {
+        if ($job.Enabled -eq $false) { continue }
+
+        $jobName        = $job.JobName
+        $freqHours      = if ($job.Frequency) { [int]$job.Frequency } else { 24 }
+        $thresholdHours = $freqHours + 2   # 2h grace period prevents spurious catch-ups
+
+        $status    = $statusTable[$jobName]
+        $hoursAgo  = $null
+        $isOverdue = $false
+
+        # Skip if already running -- avoids launching a second instance of the same job
+        if ($status -and $status.LastStatus -eq 'Running') {
+            Write-Log "MissedJobCheck: $jobName is currently Running -- skipping" -Level INFO
+            continue
+        }
+
+        if (-not $status -or -not $status.LastRun) {
+            $isOverdue = $true
+        } else {
+            try {
+                $lastRun  = [datetime]$status.LastRun
+                $hoursAgo = ($now - $lastRun).TotalHours
+                $isOverdue = $hoursAgo -gt $thresholdHours
+            } catch {
+                $isOverdue = $true
+            }
+        }
+
+        if ($isOverdue) {
+            $sinceMsg = if ($null -ne $hoursAgo) { "$([math]::Round($hoursAgo, 1))h ago" } else { "never" }
+            Write-Log "MissedJobCheck: $jobName last ran $sinceMsg (threshold ${thresholdHours}h) -- launching catch-up job" -Level INFO
+            Start-Process -FilePath "powershell.exe" `
+                -ArgumentList "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptFile`" -JobName `"$jobName`"" `
+                -WindowStyle Hidden
+        }
+    }
+}
+
 function Invoke-BackupJob {
     param([string]$JobName)
 
@@ -2051,6 +2113,11 @@ function Invoke-BackupJob {
             Write-Log "Job is disabled" -Level WARNING
             return $false
         }
+
+        # Notify API that the job is starting so the dashboard shows Running immediately.
+        try {
+            Send-RrmHeartbeat -JobName $JobName -Status 'Running' -RanAt $startTime.ToString('o')
+        } catch {}
 
         # Pre-flight: ping every destination peer via Tailscale before starting.
         # Ensures Tailscale is actually routing traffic, not just locally connected.
@@ -2187,6 +2254,7 @@ try {
         # Also ensure the scheduled task exists (this is where it gets installed
         # on peers that updated but haven't run a job yet)
         Ensure-AutoUpdateTask
+        Invoke-MissedJobCheck
         Write-Log "UpdateOnly: already on latest version $(Get-LocalRrVersion)" -Level INFO
         exit 0
     }
