@@ -2037,9 +2037,10 @@ function Invoke-MissedJobCheck {
     foreach ($job in $jobs) {
         if ($job.Enabled -eq $false) { continue }
 
-        $jobName        = $job.JobName
-        $freqHours      = if ($job.Frequency) { [int]$job.Frequency } else { 24 }
-        $thresholdHours = $freqHours + 2   # 2h grace period prevents spurious catch-ups
+        $jobName   = $job.JobName
+        $freqHours = 24
+        if ($job.Frequency) { $freqHours = [int]$job.Frequency }
+        $thresholdHours = $freqHours + 2
 
         $status    = $statusTable[$jobName]
         $hoursAgo  = $null
@@ -2057,18 +2058,18 @@ function Invoke-MissedJobCheck {
             try {
                 $lastRun  = [datetime]$status.LastRun
                 $hoursAgo = ($now - $lastRun).TotalHours
-                $isOverdue = $hoursAgo -gt $thresholdHours
+                $isOverdue = ($hoursAgo -gt $thresholdHours)
             } catch {
                 $isOverdue = $true
             }
         }
 
         if ($isOverdue) {
-            $sinceMsg = if ($null -ne $hoursAgo) { "$([math]::Round($hoursAgo, 1))h ago" } else { "never" }
+            $sinceMsg = "never"
+            if ($null -ne $hoursAgo) { $sinceMsg = "$([math]::Round($hoursAgo, 1))h ago" }
             Write-Log "MissedJobCheck: $jobName last ran $sinceMsg (threshold ${thresholdHours}h) -- launching catch-up job" -Level INFO
-            Start-Process -FilePath "powershell.exe" `
-                -ArgumentList "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptFile`" -JobName `"$jobName`"" `
-                -WindowStyle Hidden
+            $psArgs = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptFile`" -JobName `"$jobName`""
+            Start-Process -FilePath "powershell.exe" -ArgumentList $psArgs -WindowStyle Hidden
         }
     }
 }
