@@ -2044,6 +2044,14 @@ function Invoke-MissedJobCheck {
     $isPerJob = ($tailscaleMode -eq 'PerJob')
     $launchedCount = 0
 
+    # Sort jobs by most overdue first: never-run jobs go first (LastRun = $null),
+    # then by oldest LastRun. This ensures the most urgent job runs next in PerJob mode.
+    $jobs = $jobs | Sort-Object -Property {
+        $s = $statusTable[$_.JobName]
+        if (-not $s -or -not $s.LastRun) { return [datetime]::MinValue }
+        try { return [datetime]$s.LastRun } catch { return [datetime]::MinValue }
+    }
+
     foreach ($job in $jobs) {
         if ($job.Enabled -eq $false) { continue }
 
