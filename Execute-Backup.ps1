@@ -2034,6 +2034,16 @@ function Invoke-MissedJobCheck {
     $statusTable = Get-JobsStatus
     $now = Get-Date
 
+    # In PerJob mode each catch-up job connects and disconnects Tailscale.
+    # Running two PerJob jobs in parallel causes a race: the first to finish
+    # calls tailscale down while the second is still backing up, breaking SMB
+    # and DNS for the running job. Fix: launch at most one catch-up per
+    # invocation in PerJob mode. The next hourly check handles remaining jobs.
+    $config = Get-RingConfig
+    $tailscaleMode = Get-EffectiveTailscaleMode -Config $config
+    $isPerJob = ($tailscaleMode -eq 'PerJob')
+    $launchedCount = 0
+
     foreach ($job in $jobs) {
         if ($job.Enabled -eq $false) { continue }
 
@@ -2049,6 +2059,7 @@ function Invoke-MissedJobCheck {
         # Skip if already running -- avoids launching a second instance of the same job
         if ($status -and $status.LastStatus -eq 'Running') {
             Write-Log "MissedJobCheck: $jobName is currently Running -- skipping" -Level INFO
+            if ($isPerJob) { return }   # another PerJob backup is active; stop here
             continue
         }
 
@@ -2070,6 +2081,9 @@ function Invoke-MissedJobCheck {
             Write-Log "MissedJobCheck: $jobName last ran $sinceMsg (threshold ${thresholdHours}h) -- launching catch-up job" -Level INFO
             $psArgs = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptFile`" -JobName `"$jobName`""
             Start-Process -FilePath "powershell.exe" -ArgumentList $psArgs -WindowStyle Hidden
+            $launchedCount++
+            # In PerJob mode stop after one launch -- next hourly check handles the rest
+            if ($isPerJob) { return }
         }
     }
 }
