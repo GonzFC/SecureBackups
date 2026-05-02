@@ -1962,10 +1962,13 @@ function Send-RrmHeartbeat {
         }
     }
 
+    $tsMode = Get-EffectiveTailscaleMode -Config $config
+
     $payload = @{
-        hostname  = $config.Hostname
-        rrVersion = (Get-LocalRrVersion)
-        disk      = $diskPayload
+        hostname      = $config.Hostname
+        rrVersion     = (Get-LocalRrVersion)
+        tailscaleMode = $tsMode
+        disk          = $diskPayload
         jobs      = @(
             @{
                 name             = $job.JobName
@@ -2152,9 +2155,9 @@ function Invoke-BackupJob {
             $preOkCount   = 0
             $preFailNames = @()
             foreach ($dest in @($job.PeerDestinations)) {
-                $destLabel = if ($dest.Location) { $dest.Location } `
-                             elseif ($dest.Hostname) { $dest.Hostname } `
-                             else { $dest.TailscaleIP }
+                $destLabel = $dest.TailscaleIP
+                if ($dest.Hostname) { $destLabel = $dest.Hostname }
+                if ($dest.Location) { $destLabel = $dest.Location }
                 $peerOk = $dest.TailscaleIP -and (Test-TailscalePeerReachable -TailscaleIP $dest.TailscaleIP)
                 if (-not $peerOk) {
                     # Retry once -- node map may not have synced right after tailscale up
