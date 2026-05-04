@@ -712,7 +712,9 @@ function Invoke-RetentionCleanup {
         $bytes = (Get-ChildItem $folder.FullName -Recurse -ErrorAction SilentlyContinue |
                   Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
         Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction SilentlyContinue
-        return [int64](if ($bytes) { $bytes } else { 0 })
+        $bytesOut = [int64]0
+        if ($bytes) { $bytesOut = [int64]$bytes }
+        return $bytesOut
     }
 
     # Delete excess monthly (0 = delete all monthly)
@@ -1309,9 +1311,13 @@ function New-PeerExecutionDescriptor {
         [double]$QuotaGB
     )
     
-    $appName = if ($Job.AppNameClean) { $Job.AppNameClean } elseif ($Job.AppName) { $Job.AppName } else { $Job.JobName }
-    $location = if ($Job.SourceLocation) { $Job.SourceLocation } else { (Get-RingConfig).Location }
-    $customerCode = if ($Job.CustomerCode) { $Job.CustomerCode } else { (Get-RingConfig).CustomerCode }
+    $appName = $Job.JobName
+    if ($Job.AppName) { $appName = $Job.AppName }
+    if ($Job.AppNameClean) { $appName = $Job.AppNameClean }
+    $location = (Get-RingConfig).Location
+    if ($Job.SourceLocation) { $location = $Job.SourceLocation }
+    $customerCode = (Get-RingConfig).CustomerCode
+    if ($Job.CustomerCode) { $customerCode = $Job.CustomerCode }
     $typeFolder = Get-PeerTypeFolder -BackupType $Job.BackupType
     
     return [PSCustomObject]@{
@@ -1455,13 +1461,19 @@ function Invoke-BackupToPeer {
     
     $peerIP = $Peer.TailscaleIP
     # Support both BasePath (correct) and SharePath (legacy/bug) property names
-    $basePath = if ($Peer.BasePath) { $Peer.BasePath } else { $Peer.SharePath }
+    $basePath = $Peer.SharePath
+    if ($Peer.BasePath) { $basePath = $Peer.BasePath }
     # Fallback chain for app name: AppNameClean -> AppName -> JobName
-    $appName = if ($Job.AppNameClean) { $Job.AppNameClean } elseif ($Job.AppName) { $Job.AppName } else { $Job.JobName }
+    $appName = $Job.JobName
+    if ($Job.AppName) { $appName = $Job.AppName }
+    if ($Job.AppNameClean) { $appName = $Job.AppNameClean }
     # CustomerCode from job, or fall back to ring-config
-    $customerCode = if ($Job.CustomerCode) { $Job.CustomerCode } else { (Get-RingConfig).CustomerCode }
-    
-    $peerLabel = if ($Peer.Location) { $Peer.Location } elseif ($Peer.Hostname) { $Peer.Hostname } else { $peerIP }
+    $customerCode = (Get-RingConfig).CustomerCode
+    if ($Job.CustomerCode) { $customerCode = $Job.CustomerCode }
+
+    $peerLabel = $peerIP
+    if ($Peer.Hostname) { $peerLabel = $Peer.Hostname }
+    if ($Peer.Location) { $peerLabel = $Peer.Location }
     Write-Log "--- Peer: $peerLabel ($peerIP) | Type: $RetentionType ---" -Level INFO
 
     Write-Log "Verifying Tailscale connectivity to $peerLabel ($peerIP)..." -Level INFO
@@ -1693,7 +1705,9 @@ function Invoke-UnifiedBackup {
 
     # Backup to each peer
     foreach ($peer in $executionPeers) {
-        $peerLabel  = if ($peer.Location) { $peer.Location } elseif ($peer.Hostname) { $peer.Hostname } else { $peer.TailscaleIP }
+        $peerLabel = $peer.TailscaleIP
+        if ($peer.Hostname) { $peerLabel = $peer.Hostname }
+        if ($peer.Location) { $peerLabel = $peer.Location }
         $peerFailed = $false
 
         # For each retention type that applies today
