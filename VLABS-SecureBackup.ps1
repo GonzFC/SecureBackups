@@ -2514,8 +2514,7 @@ function Invoke-Uninstall {
 
 function Invoke-HeartbeatMenu {
     Write-Host "`nSending heartbeat to RRM API for all jobs..." -ForegroundColor Cyan
-    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-        -File $script:ExecutionScript -HeartbeatOnly
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script:ExecutionScript -HeartbeatOnly
     Write-Host "`nHeartbeat sent. Check the web app to verify." -ForegroundColor Green
     Read-Host "`nPress Enter to continue"
 }
