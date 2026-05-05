@@ -14,7 +14,10 @@ param(
     [switch]$SkipUpdateCheck,
 
     # Run only the auto-update check and exit  -  no backup job
-    [switch]$UpdateOnly
+    [switch]$UpdateOnly,
+
+    # Send heartbeat for all jobs with known status and exit  -  no backup job
+    [switch]$HeartbeatOnly
 )
 
 # Configuration - Data in ProgramData (separate from git install directory)
@@ -2024,6 +2027,69 @@ function Send-RrmHeartbeat {
     }
 }
 
+function Invoke-ManualHeartbeat {
+    <#
+    .SYNOPSIS
+        Sends a heartbeat to the RRM API for every job that has run at least once.
+        Updates peer info (version, disk, tailscale mode) and job definitions in the
+        web app without running a backup.  Jobs currently in Running state are skipped.
+    #>
+    Write-Log "Manual heartbeat started" -Level INFO
+
+    $jobs = @(Get-Jobs)
+    if (-not $jobs -or $jobs.Count -eq 0) {
+        Write-Log "Manual heartbeat: no jobs configured" -Level INFO
+        return
+    }
+
+    $statusTable = Get-JobsStatus
+    $diskInfo    = Get-DiskSpaceInfo
+    $sentCount   = 0
+    $firstJob    = $true
+
+    foreach ($job in $jobs) {
+        $status = $statusTable[$job.JobName]
+
+        if (-not $status -or -not $status.LastRun) {
+            Write-Log "Manual heartbeat: skipping '$($job.JobName)' - never run" -Level INFO
+            continue
+        }
+
+        if ($status.LastStatus -eq 'Running') {
+            Write-Log "Manual heartbeat: skipping '$($job.JobName)' - currently Running" -Level WARNING
+            continue
+        }
+
+        $diskArg = $null
+        if ($firstJob) {
+            $diskArg  = $diskInfo
+            $firstJob = $false
+        }
+
+        $dur = [int]0
+        $sz  = [long]0
+        if ($null -ne $status.LastDurationSeconds) { $dur = [int]$status.LastDurationSeconds }
+        if ($null -ne $status.LastSizeBytes)        { $sz  = [long]$status.LastSizeBytes }
+
+        try {
+            Send-RrmHeartbeat `
+                -JobName         $job.JobName `
+                -Status          $status.LastStatus `
+                -RanAt           (Get-Date).ToString('o') `
+                -DurationSeconds $dur `
+                -SizeBytes       $sz `
+                -DiskInfo        $diskArg
+            Write-Log "Manual heartbeat OK: '$($job.JobName)' [$($status.LastStatus)]" -Level INFO
+            $sentCount++
+        }
+        catch {
+            Write-Log "Manual heartbeat failed for '$($job.JobName)': $_" -Level WARNING
+        }
+    }
+
+    Write-Log "Manual heartbeat complete: $sentCount job(s) sent" -Level INFO
+}
+
 #endregion
 
 #region Main
@@ -2299,9 +2365,15 @@ try {
         exit 0
     }
 
+    # -HeartbeatOnly mode: push current peer/job state to API and exit  -  no backup
+    if ($HeartbeatOnly) {
+        Invoke-ManualHeartbeat
+        exit 0
+    }
+
     # Normal mode: require -JobName
     if (-not $JobName) {
-        Write-Error "JobName is required unless -UpdateOnly is specified."
+        Write-Error "JobName is required unless -UpdateOnly or -HeartbeatOnly is specified."
         exit 1
     }
 

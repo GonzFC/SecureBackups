@@ -2512,6 +2512,14 @@ function Invoke-Uninstall {
     exit 0
 }
 
+function Invoke-HeartbeatMenu {
+    Write-Host "`nSending heartbeat to RRM API for all jobs..." -ForegroundColor Cyan
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File $script:ExecutionScript -HeartbeatOnly
+    Write-Host "`nHeartbeat sent. Check the web app to verify." -ForegroundColor Green
+    Read-Host "`nPress Enter to continue"
+}
+
 #endregion
 
 #region Main Menu
@@ -2533,6 +2541,7 @@ function Show-MainMenu {
     Write-Host " 9. View Backup Status & History" -ForegroundColor White
     Write-Host " 0. Exit" -ForegroundColor White
     Write-Host ""
+    Write-Host " H. Send Heartbeat to RRM API" -ForegroundColor White
     Write-Host " U. Uninstall Resilience Ring" -ForegroundColor DarkRed
 
     Write-Host "`n===============================================" -ForegroundColor Cyan
@@ -2558,6 +2567,7 @@ function Start-MainLoop {
                 Write-Log "Application closed" -Level INFO
                 exit 0
             }
+            "H" { Invoke-HeartbeatMenu }
             "U" { Invoke-Uninstall }
             default {
                 Write-Host "`nInvalid choice! Please try again." -ForegroundColor Red
