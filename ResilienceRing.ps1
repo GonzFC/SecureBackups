@@ -508,6 +508,7 @@ function Show-MainMenu {
 
     Write-Host ""
     Write-Host " SYSTEM" -ForegroundColor Yellow
+    Write-Host "   H. Send Heartbeat to API" -ForegroundColor White
     Write-Host "   U. Check for Updates" -ForegroundColor White
     Write-Host "   0. Exit" -ForegroundColor White
 
@@ -563,6 +564,12 @@ function Start-MainLoop {
             "9" { Show-BackupStatus }
 
             # System
+            "H" {
+                Write-Host "`nSending heartbeat to API for all jobs..." -ForegroundColor Cyan
+                & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script:ExecutionScript -HeartbeatOnly
+                Write-Host "`nDone. Check the web app to verify." -ForegroundColor Green
+                Read-Host "`nPress Enter to continue"
+            }
             "U" { Invoke-SelfUpdate }
             "X" { Invoke-Uninstall }
             "0" {
