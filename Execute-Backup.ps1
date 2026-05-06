@@ -987,12 +987,19 @@ function Invoke-TailscaleViaSystem {
         Register-ScheduledTask -TaskName $tempTaskName -Action $action `
             -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
         Start-ScheduledTask -TaskName $tempTaskName -ErrorAction Stop
-        $waited = 0
-        while ($waited -lt $TimeoutSeconds) {
+        # Wait for task to enter Running state (up to 5s)
+        $deadline = (Get-Date).AddSeconds(5)
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+            $task = Get-ScheduledTask -TaskName $tempTaskName -ErrorAction SilentlyContinue
+            if ($task -and $task.State -eq 'Running') { break }
+        }
+        # Wait for task to finish (up to TimeoutSeconds)
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
             Start-Sleep -Seconds 1
-            $waited++
-            $info = Get-ScheduledTaskInfo -TaskName $tempTaskName -ErrorAction SilentlyContinue
-            if ($info -and $info.LastTaskResult -ne 267009) { break }
+            $task = Get-ScheduledTask -TaskName $tempTaskName -ErrorAction SilentlyContinue
+            if (-not $task -or $task.State -ne 'Running') { break }
         }
         return $true
     }
@@ -1088,7 +1095,13 @@ function Ensure-TailscaleForBackup {
                 $result.Reason = "tailscale up failed (exit $upExitCode); SYSTEM task fallback also failed"
                 return $result
             }
-            # Fall through to connection-state poll below
+            # tailscale status --json also returns 401 for this user, so skip the CLI poll.
+            # Wait for the network layer to settle, then assume connected.
+            Write-Log "SYSTEM task completed -- waiting 5s for Tailscale to settle..." -Level INFO
+            Start-Sleep -Seconds 5
+            $result.Ready        = $true
+            $result.StartedByJob = $true
+            return $result
         } else {
             $result.Reason = "tailscale up failed (exit $upExitCode)"
             return $result
