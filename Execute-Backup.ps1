@@ -967,6 +967,44 @@ function Read-RobocopyLogSummary {
 
 #region Tailscale Session
 
+function Invoke-TailscaleViaSystem {
+    <#
+    .SYNOPSIS
+        Runs a tailscale command via a one-shot SYSTEM scheduled task.
+        Fallback for when direct invocation fails with 401 (daemon runs as a
+        different local user account and rejects connections from this process).
+    #>
+    param(
+        [string]$TailscaleExe,
+        [string]$Arguments,
+        [int]$TimeoutSeconds = 20
+    )
+    $tempTaskName = "RR-TailscaleOp-Temp"
+    try {
+        $action    = New-ScheduledTaskAction -Execute $TailscaleExe -Argument $Arguments
+        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+        $settings  = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
+        Register-ScheduledTask -TaskName $tempTaskName -Action $action `
+            -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName $tempTaskName -ErrorAction Stop
+        $waited = 0
+        while ($waited -lt $TimeoutSeconds) {
+            Start-Sleep -Seconds 1
+            $waited++
+            $info = Get-ScheduledTaskInfo -TaskName $tempTaskName -ErrorAction SilentlyContinue
+            if ($info -and $info.LastTaskResult -ne 267009) { break }
+        }
+        return $true
+    }
+    catch {
+        Write-Log "Invoke-TailscaleViaSystem ('$Arguments') failed: $_" -Level WARNING
+        return $false
+    }
+    finally {
+        Unregister-ScheduledTask -TaskName $tempTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    }
+}
+
 function Ensure-TailscaleForBackup {
     <#
     .SYNOPSIS
@@ -1042,8 +1080,19 @@ function Ensure-TailscaleForBackup {
 
     if ($upExitCode -ne 0) {
         Write-Log "tailscale up failed with exit code: $upExitCode" -Level ERROR
-        $result.Reason = "tailscale up failed (exit $upExitCode)"
-        return $result
+        # 401 means the daemon is running as a different local user -- retry via SYSTEM task
+        if ($upOutput -match '401') {
+            Write-Log "Detected 401 (daemon user mismatch) -- retrying tailscale up via SYSTEM scheduled task..." -Level INFO
+            $sysOk = Invoke-TailscaleViaSystem -TailscaleExe $tailscaleExe -Arguments "up" -TimeoutSeconds 20
+            if (-not $sysOk) {
+                $result.Reason = "tailscale up failed (exit $upExitCode); SYSTEM task fallback also failed"
+                return $result
+            }
+            # Fall through to connection-state poll below
+        } else {
+            $result.Reason = "tailscale up failed (exit $upExitCode)"
+            return $result
+        }
     }
 
     Write-Log "Waiting for Tailscale to reach connected state..." -Level INFO
@@ -1083,7 +1132,11 @@ function Restore-TailscaleAfterBackup {
     }
     
     Write-Log "Disconnecting Tailscale after backup job completion..." -Level INFO
-    & $tailscaleExe down 2>&1 | Out-Null
+    $downOut = (& $tailscaleExe down 2>&1) -join " "
+    if ($downOut -match '401') {
+        Write-Log "tailscale down got 401 -- retrying via SYSTEM scheduled task..." -Level INFO
+        Invoke-TailscaleViaSystem -TailscaleExe $tailscaleExe -Arguments "down" -TimeoutSeconds 15 | Out-Null
+    }
     Write-Log "Tailscale disconnected" -Level INFO
 }
 
