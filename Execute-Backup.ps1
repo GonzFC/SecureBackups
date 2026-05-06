@@ -2055,17 +2055,13 @@ function Invoke-ManualHeartbeat {
             continue
         }
 
-        if ($status.LastStatus -eq 'Running') {
-            Write-Log "Manual heartbeat: skipping '$($job.JobName)' - currently Running" -Level WARNING
-            continue
-        }
-
         $diskArg = $null
         if ($firstJob) {
             $diskArg  = $diskInfo
             $firstJob = $false
         }
 
+        $sendStatus = $status.LastStatus
         $dur = [int]0
         $sz  = [long]0
         if ($null -ne $status.LastDurationSeconds) { $dur = [int]$status.LastDurationSeconds }
@@ -2074,12 +2070,12 @@ function Invoke-ManualHeartbeat {
         try {
             Send-RrmHeartbeat `
                 -JobName         $job.JobName `
-                -Status          $status.LastStatus `
+                -Status          $sendStatus `
                 -RanAt           (Get-Date).ToString('o') `
                 -DurationSeconds $dur `
                 -SizeBytes       $sz `
                 -DiskInfo        $diskArg
-            Write-Log "Manual heartbeat OK: '$($job.JobName)' [$($status.LastStatus)]" -Level INFO
+            Write-Log "Manual heartbeat OK: '$($job.JobName)' [$sendStatus]" -Level INFO
             $sentCount++
         }
         catch {
