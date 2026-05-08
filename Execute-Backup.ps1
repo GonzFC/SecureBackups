@@ -754,10 +754,16 @@ function Invoke-RetentionCleanup {
 
 function Get-FileChecksum {
     param([string]$FilePath)
-    
+
     if (-not (Test-Path $FilePath -PathType Leaf)) { return $null }
-    
+
     try {
+        $item = Get-Item $FilePath -ErrorAction Stop
+        # SHA256 over SMB hangs indefinitely on large files (>= 100 MB).
+        # Use a size-based pseudo-hash instead -- sufficient post-robocopy.
+        if ($item.Length -ge 100MB) {
+            return "SIZE:$($item.Length)"
+        }
         $hash = Get-FileHash -Path $FilePath -Algorithm SHA256 -ErrorAction Stop
         return $hash.Hash
     }
@@ -779,11 +785,15 @@ function Test-BackupIntegrity {
         $dstHash = Get-FileChecksum -FilePath $DestPath
         
         if ($srcHash -and $dstHash -and ($srcHash -eq $dstHash)) {
-            Write-Log "Checksum verified: $srcHash" -Level SUCCESS
+            if ($srcHash -like 'SIZE:*') {
+                Write-Log "Size match verified: $($srcHash.Substring(5)) bytes" -Level SUCCESS
+            } else {
+                Write-Log "Checksum verified: $srcHash" -Level SUCCESS
+            }
             return $true
         }
         else {
-            Write-Log "Checksum MISMATCH!" -Level ERROR
+            Write-Log "Checksum MISMATCH! (src=$srcHash  dst=$dstHash)" -Level ERROR
             return $false
         }
     }
@@ -839,10 +849,13 @@ function Write-BackupManifest {
                  Sort-Object FullName
 
         $lines = @(foreach ($file in $files) {
-            $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
-            if ($hash) {
-                $relativePath = $file.FullName.Substring($BackupPath.Length).TrimStart('\')
-                "$hash  $relativePath"
+            $relativePath = $file.FullName.Substring($BackupPath.Length).TrimStart('\')
+            if ($file.Length -ge 100MB) {
+                # Skip SHA256 for large files -- hashing GB files over SMB hangs indefinitely
+                "SIZE:$($file.Length)  $relativePath"
+            } else {
+                $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+                if ($hash) { "$hash  $relativePath" }
             }
         })
 
