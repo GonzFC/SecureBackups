@@ -1157,6 +1157,14 @@ function Restore-TailscaleAfterBackup {
         return
     }
     
+    # Don't disconnect if another backup job is still running -- it also needs Tailscale
+    $otherJobs = @(Get-WmiObject Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { [int]$_.ProcessId -ne $PID -and $_.CommandLine -like '*Execute-Backup*' -and $_.CommandLine -like '*-JobName*' })
+    if ($otherJobs.Count -gt 0) {
+        Write-Log "Skipping tailscale down -- $($otherJobs.Count) other backup job(s) still running" -Level INFO
+        return
+    }
+
     Write-Log "Disconnecting Tailscale after backup job completion..." -Level INFO
     $downOut = (& $tailscaleExe down 2>&1) -join " "
     if ($downOut -match '401') {
