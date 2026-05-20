@@ -1137,6 +1137,19 @@ function Remove-BackupDestination {
 
 #region Backup Job Management
 
+function Get-DefaultDestinationPeer {
+    <#
+    .SYNOPSIS
+        Returns the default destination peer (e.g. VLABS cloud backup server)
+        if DefaultDestinationPeerIP is set in ring-config.json.
+    #>
+    $cfg = Get-RingConfig
+    if (-not $cfg -or -not $cfg.DefaultDestinationPeerIP) { return $null }
+    $ip = $cfg.DefaultDestinationPeerIP
+    $peer = @(Get-StoragePeersList) | Where-Object { $_.TailscaleIP -eq $ip } | Select-Object -First 1
+    return $peer
+}
+
 function New-BackupJob {
     Clear-Host
     Write-Host "`n===============================================" -ForegroundColor Cyan
@@ -1261,6 +1274,27 @@ function New-BackupJob {
         return
     }
 
+    # Auto-include default destination peer (VLABS cloud backup) if configured
+    $peerDestinations = @()
+    $defaultPeer = Get-DefaultDestinationPeer
+    if ($defaultPeer) {
+        $localCfg     = Get-RingConfig
+        $custCode     = if ($localCfg.CustomerCode) { $localCfg.CustomerCode } else { "" }
+        $srcLocation  = if ($localCfg.Location) { $localCfg.Location } else { $env:COMPUTERNAME }
+        $basePath     = Get-DestinationPath -TailscaleIP $defaultPeer.TailscaleIP `
+                            -CustomerCode $custCode -Location $srcLocation `
+                            -Application $jobName -BackupType $backupType
+        $peerDestinations += [PSCustomObject]@{
+            Hostname     = $defaultPeer.Hostname
+            TailscaleIP  = $defaultPeer.TailscaleIP
+            Location     = $defaultPeer.Location
+            CustomerCode = $defaultPeer.CustomerCode
+            BasePath     = $basePath
+        }
+        $peerLabel = if ($defaultPeer.Location) { $defaultPeer.Location } else { $defaultPeer.Hostname }
+        Write-Host "`n[OK] VLABS cloud backup added automatically: $peerLabel" -ForegroundColor Green
+    }
+
     # Create job object (including credentials from destination)
     $newJob = @{
         JobName = $jobName
@@ -1277,6 +1311,7 @@ function New-BackupJob {
         CreatedDate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
         TaskName = "VLABS_Backup_$jobName"
         Enabled = $true
+        PeerDestinations = $peerDestinations
         # Note: LastRun/LastStatus are now stored in jobs-status.json (transaction data)
     }
 
@@ -2523,6 +2558,68 @@ function Invoke-HeartbeatMenu {
 
 #region Main Menu
 
+function Add-DefaultPeerToAllJobs {
+    <#
+    .SYNOPSIS
+        Adds the default VLABS destination peer to every job that doesn't already have it.
+    #>
+    $defaultPeer = Get-DefaultDestinationPeer
+    if (-not $defaultPeer) {
+        Write-Host "`nNo default destination peer configured." -ForegroundColor Yellow
+        Write-Host "Set 'DefaultDestinationPeerIP' in ring-config.json and run 'Discover & Update' first." -ForegroundColor Gray
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    $jobs = @(Get-Jobs)
+    if ($jobs.Count -eq 0) {
+        Write-Host "`nNo jobs found." -ForegroundColor Yellow
+        Read-Host "`nPress Enter to continue"
+        return
+    }
+
+    $localCfg    = Get-RingConfig
+    $custCode    = if ($localCfg.CustomerCode) { $localCfg.CustomerCode } else { "" }
+    $srcLocation = if ($localCfg.Location) { $localCfg.Location } else { $env:COMPUTERNAME }
+    $peerLabel   = if ($defaultPeer.Location) { $defaultPeer.Location } else { $defaultPeer.Hostname }
+
+    $added   = 0
+    $skipped = 0
+    for ($i = 0; $i -lt $jobs.Count; $i++) {
+        $job   = $jobs[$i]
+        $dests = if ($job.PeerDestinations) { @($job.PeerDestinations) } else { @() }
+
+        if ($dests | Where-Object { $_.TailscaleIP -eq $defaultPeer.TailscaleIP }) {
+            $skipped++
+            continue
+        }
+
+        $basePath = Get-DestinationPath -TailscaleIP $defaultPeer.TailscaleIP `
+                        -CustomerCode $custCode -Location $srcLocation `
+                        -Application $job.JobName -BackupType $job.BackupType
+        $dests += [PSCustomObject]@{
+            Hostname     = $defaultPeer.Hostname
+            TailscaleIP  = $defaultPeer.TailscaleIP
+            Location     = $defaultPeer.Location
+            CustomerCode = $defaultPeer.CustomerCode
+            BasePath     = $basePath
+        }
+        $jobs[$i].PeerDestinations = $dests
+        Write-Host "  + $($job.JobName)" -ForegroundColor Cyan
+        $added++
+    }
+
+    if ($added -gt 0) {
+        Save-Jobs -Jobs $jobs | Out-Null
+        Write-Host "`n[OK] Added '$peerLabel' to $added job(s)." -ForegroundColor Green
+        if ($skipped -gt 0) { Write-Host "     ($skipped job(s) already had it -- skipped)" -ForegroundColor Gray }
+    } else {
+        Write-Host "`nAll $skipped job(s) already have '$peerLabel' as destination." -ForegroundColor Yellow
+    }
+
+    Read-Host "`nPress Enter to continue"
+}
+
 function Show-MainMenu {
     Clear-Host
     Write-Host "`n===============================================" -ForegroundColor Cyan
@@ -2541,6 +2638,7 @@ function Show-MainMenu {
     Write-Host " 0. Exit" -ForegroundColor White
     Write-Host ""
     Write-Host " H. Send Heartbeat to RRM API" -ForegroundColor White
+    Write-Host " V. Add VLABS backup to all existing jobs" -ForegroundColor White
     Write-Host " U. Uninstall Resilience Ring" -ForegroundColor DarkRed
 
     Write-Host "`n===============================================" -ForegroundColor Cyan
@@ -2567,6 +2665,7 @@ function Start-MainLoop {
                 exit 0
             }
             "H" { Invoke-HeartbeatMenu }
+            "V" { Add-DefaultPeerToAllJobs }
             "U" { Invoke-Uninstall }
             default {
                 Write-Host "`nInvalid choice! Please try again." -ForegroundColor Red
