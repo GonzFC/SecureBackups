@@ -2096,17 +2096,25 @@ function Send-RrmHeartbeat {
     } | ConvertTo-Json -Depth 10
 
     try {
-        Invoke-RestMethod `
+        $response = Invoke-RestMethod `
             -Uri         $endpoint `
             -Method      POST `
             -Headers     @{ 'X-Api-Key' = $config.RrmApiKey } `
             -Body        $payload `
             -ContentType 'application/json' `
             -TimeoutSec  30 `
-            -ErrorAction Stop | Out-Null
+            -ErrorAction Stop
 
         $diskTag = if ($diskPayload) { "disk=yes" } else { "disk=no" }
         Write-Log "RRM heartbeat OK  -  job='$JobName' status='$Status' rrVersion='$(Get-LocalRrVersion)' $diskTag" -Level INFO
+
+        # If the API returns a default destination peer IP and it's not set yet, save it
+        if ($response.defaultDestinationPeerIp -and -not $config.DefaultDestinationPeerIP) {
+            $config | Add-Member -NotePropertyName 'DefaultDestinationPeerIP' -NotePropertyValue $response.defaultDestinationPeerIp -Force
+            $configPath = Join-Path $script:ConfigPath "ring-config.json"
+            $config | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8
+            Write-Log "DefaultDestinationPeerIP set from API: $($response.defaultDestinationPeerIp)" -Level INFO
+        }
     }
     catch {
         # Non-fatal: peer keeps working even if the API is unreachable
