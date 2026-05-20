@@ -492,6 +492,7 @@ function Show-MainMenu {
     Write-Host "   3. Delete Backup Job" -ForegroundColor White
     Write-Host "   4. Run Backup Job Now" -ForegroundColor White
     Write-Host "   5. Show All Backup Jobs" -ForegroundColor White
+    Write-Host "   V. Add VLABS backup to all existing jobs" -ForegroundColor White
 
     Write-Host ""
     Write-Host " STORAGE PEERS" -ForegroundColor Yellow
@@ -538,6 +539,7 @@ function Start-MainLoop {
             "3" { Remove-BackupJob }
             "4" { Invoke-BackupJobNow }
             "5" { Show-AllBackupJobs }
+            "V" { Add-DefaultPeerToAllJobs }
 
             # Storage Peers
             "P" { Add-StoragePeer }
