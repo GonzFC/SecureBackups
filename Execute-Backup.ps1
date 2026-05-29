@@ -237,6 +237,78 @@ function Invoke-AutoUpdate {
     }
 }
 
+function Sync-TailscaleAuthKey {
+    <#
+    .SYNOPSIS
+        Fetches the Tailscale auth key from the RRM API and updates the local cache.
+    .DESCRIPTION
+        Called during -UpdateOnly so peers rotate the key within one hour of an admin
+        updating it in the RRM dashboard.  When the locally cached key is missing or
+        differs from the API value (including the first deploy on existing peers), the
+        new key is written to ring-config.json and applied immediately via
+        Invoke-TailscaleReauth.  Non-fatal: any failure is logged as a warning only.
+    #>
+    $config = Get-RingConfig
+    if (-not $config) {
+        Write-Log "Sync-TailscaleAuthKey: no ring-config.json -- skipping" -Level INFO
+        return
+    }
+    if (-not $config.RrmApiKey) {
+        Write-Log "Sync-TailscaleAuthKey: RrmApiKey not set -- skipping" -Level INFO
+        return
+    }
+
+    $rrmUrl   = if ($config.RrmApiUrl) { $config.RrmApiUrl } else { 'https://mercury.velociraptor-hoki.ts.net' }
+    $endpoint = "$($rrmUrl.TrimEnd('/'))/api/peer-config"
+
+    try {
+        $response = Invoke-RestMethod `
+            -Uri         $endpoint `
+            -Method      GET `
+            -Headers     @{ 'X-Api-Key' = $config.RrmApiKey } `
+            -TimeoutSec  15 `
+            -ErrorAction Stop
+    }
+    catch {
+        Write-Log "Sync-TailscaleAuthKey: API unreachable (non-fatal): $_" -Level WARNING
+        return
+    }
+
+    $apiKey = $response.tailscaleAuthKey
+    if ([string]::IsNullOrEmpty($apiKey)) {
+        Write-Log "Sync-TailscaleAuthKey: no key configured in RRM -- skipping" -Level INFO
+        return
+    }
+
+    $localKey = $config.TailscaleAuthKey
+    if ($localKey -eq $apiKey) {
+        Write-Log "Sync-TailscaleAuthKey: key is current -- no change" -Level INFO
+        return
+    }
+
+    Write-Log "Sync-TailscaleAuthKey: key changed (or first sync) -- updating cache" -Level INFO
+
+    # Persist to local cache before re-auth so the reactive path has it available
+    $config | Add-Member -NotePropertyName 'TailscaleAuthKey' -NotePropertyValue $apiKey -Force
+    $configFile = "C:\ProgramData\VLABS_ResilienceRing\ring-config.json"
+    try {
+        $config | ConvertTo-Json -Depth 10 | Set-Content $configFile -Encoding UTF8
+        Write-Log "Sync-TailscaleAuthKey: ring-config.json updated" -Level INFO
+    }
+    catch {
+        Write-Log "Sync-TailscaleAuthKey: failed to update ring-config.json: $_" -Level WARNING
+    }
+
+    # Apply the key immediately so the peer does not wait until the next job fails
+    $reauthed = Invoke-TailscaleReauth -AuthKey $apiKey
+    if ($reauthed) {
+        Write-Log "Sync-TailscaleAuthKey: Tailscale re-auth OK" -Level SUCCESS
+    }
+    else {
+        Write-Log "Sync-TailscaleAuthKey: Tailscale re-auth failed -- peer will retry on next job run" -Level WARNING
+    }
+}
+
 function Repair-Ps1Encodings {
     # Self-healing: ensure every .ps1 file in the install directory is UTF-16 LE with BOM.
     # Peers that auto-updated while running an old Execute-Backup.ps1 (without the UTF-16
@@ -1025,6 +1097,98 @@ function Invoke-TailscaleViaSystem {
     }
 }
 
+function Invoke-TailscaleReauth {
+    <#
+    .SYNOPSIS
+        Re-authenticates Tailscale using a stored auth key.
+    .DESCRIPTION
+        Runs tailscale up --authkey <key> via ProcessStartInfo so that ExitCode is
+        readable in PS 5.1.  Falls back to Invoke-TailscaleViaSystem when the daemon
+        rejects the current user (401).
+        Returns $true if Tailscale reaches BackendState Running, $false otherwise.
+    #>
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$AuthKey
+    )
+
+    $tailscaleExe = Get-TailscaleExePath
+    if (-not $tailscaleExe) {
+        Write-Log "Invoke-TailscaleReauth: Tailscale not installed" -Level WARNING
+        return $false
+    }
+
+    Write-Log "Invoke-TailscaleReauth: running tailscale up --authkey ..." -Level INFO
+
+    $exitCode = -1
+    $output   = ""
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName               = $tailscaleExe
+        $psi.Arguments              = "up --authkey $AuthKey --accept-routes"
+        $psi.UseShellExecute        = $false
+        $psi.CreateNoWindow         = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        if (-not $proc) { throw "failed to start tailscale process" }
+
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+
+        if (-not $proc.WaitForExit(30000)) {
+            try { $proc.Kill() } catch {}
+            $proc.Dispose()
+            Write-Log "Invoke-TailscaleReauth: process timed out after 30s" -Level WARNING
+            return $false
+        }
+
+        $exitCode = $proc.ExitCode
+        $output   = ($stdoutTask.Result + " " + $stderrTask.Result).Trim()
+        $proc.Dispose()
+    }
+    catch {
+        Write-Log "Invoke-TailscaleReauth: exception: $_" -Level WARNING
+        return $false
+    }
+
+    if ($output) { Write-Log "Invoke-TailscaleReauth output: $output" -Level INFO }
+
+    # 401 means the daemon runs as a different local user -- retry via SYSTEM scheduled task
+    if ($exitCode -ne 0 -and $output -match '401') {
+        Write-Log "Invoke-TailscaleReauth: got 401 -- retrying via SYSTEM task..." -Level INFO
+        $tsUpArgs = "up --authkey $AuthKey --accept-routes"
+        $sysOk = Invoke-TailscaleViaSystem -TailscaleExe $tailscaleExe `
+            -Arguments $tsUpArgs -TimeoutSeconds 25
+        if (-not $sysOk) {
+            Write-Log "Invoke-TailscaleReauth: SYSTEM task fallback failed" -Level WARNING
+            return $false
+        }
+        Write-Log "Invoke-TailscaleReauth: SYSTEM task OK -- waiting 5s for Tailscale to settle..." -Level INFO
+        Start-Sleep -Seconds 5
+        return $true
+    }
+
+    if ($exitCode -ne 0) {
+        Write-Log "Invoke-TailscaleReauth: tailscale up --authkey failed (exit $exitCode)" -Level WARNING
+        return $false
+    }
+
+    # Wait up to 10s for BackendState to reach Running
+    for ($i = 0; $i -lt 10; $i++) {
+        Start-Sleep -Seconds 1
+        $ts = Test-TailscaleInstalled
+        if ($ts.Connected) {
+            Write-Log "Invoke-TailscaleReauth: connected after $($i + 1)s" -Level INFO
+            return $true
+        }
+    }
+
+    Write-Log "Invoke-TailscaleReauth: did not reach Running state within 10s" -Level WARNING
+    return $false
+}
+
 function Ensure-TailscaleForBackup {
     <#
     .SYNOPSIS
@@ -1056,6 +1220,27 @@ function Ensure-TailscaleForBackup {
         if ($result.Mode -eq 'PerJob') {
             $result.StartedByJob = $true
         }
+        return $result
+    }
+
+    # Node key expired: skip the unauthenticated tailscale up and go straight to
+    # re-auth with the cached key from ring-config.json.
+    if ($tsStatus.Status -and $tsStatus.Status.BackendState -eq 'NeedsLogin') {
+        Write-Log "Tailscale node key expired (NeedsLogin) -- attempting re-auth with cached key" -Level WARNING
+        $cachedKey = $config.TailscaleAuthKey
+        if ([string]::IsNullOrEmpty($cachedKey)) {
+            Write-Log "No cached TailscaleAuthKey -- update the key in the RRM dashboard (Administration page)" -Level ERROR
+            $result.Reason = "tailscale NeedsLogin -- no auth key cached (set key in RRM dashboard)"
+            return $result
+        }
+        $reauthed = Invoke-TailscaleReauth -AuthKey $cachedKey
+        if ($reauthed) {
+            Write-Log "Tailscale re-authentication OK" -Level SUCCESS
+            $result.Ready = $true
+            if ($result.Mode -eq 'PerJob') { $result.StartedByJob = $true }
+            return $result
+        }
+        $result.Reason = "tailscale NeedsLogin and re-auth failed -- update key in RRM dashboard"
         return $result
     }
 
@@ -2451,6 +2636,8 @@ try {
         # Also ensure the scheduled task exists (this is where it gets installed
         # on peers that updated but haven't run a job yet)
         Ensure-AutoUpdateTask
+        # Sync Tailscale auth key from the RRM API and re-auth if the key changed
+        Sync-TailscaleAuthKey
         Invoke-MissedJobCheck
         Write-Log "UpdateOnly: already on latest version $(Get-LocalRrVersion)" -Level INFO
         exit 0
