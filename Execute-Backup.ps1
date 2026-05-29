@@ -2300,6 +2300,16 @@ function Send-RrmHeartbeat {
             $config | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8
             Write-Log "DefaultDestinationPeerIP set from API: $($response.defaultDestinationPeerIp)" -Level INFO
         }
+
+        # Cache the Tailscale auth key returned by the API so it is available locally
+        # if the node key later expires and Tailscale is down (MagicDNS won't resolve).
+        $hbKey = $response.tailscaleAuthKey
+        if (-not [string]::IsNullOrEmpty($hbKey) -and $hbKey -ne $config.TailscaleAuthKey) {
+            $config | Add-Member -NotePropertyName 'TailscaleAuthKey' -NotePropertyValue $hbKey -Force
+            $configPath = Join-Path $script:ConfigPath "ring-config.json"
+            $config | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8
+            Write-Log "TailscaleAuthKey updated from heartbeat response" -Level INFO
+        }
     }
     catch {
         # Non-fatal: peer keeps working even if the API is unreachable
