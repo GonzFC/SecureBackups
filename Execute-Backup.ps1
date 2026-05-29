@@ -1125,7 +1125,7 @@ function Invoke-TailscaleReauth {
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName               = $tailscaleExe
-        $psi.Arguments              = "up --authkey $AuthKey --accept-routes"
+        $psi.Arguments              = "up --auth-key=$AuthKey --accept-routes --reset"
         $psi.UseShellExecute        = $false
         $psi.CreateNoWindow         = $true
         $psi.RedirectStandardOutput = $true
@@ -1158,7 +1158,7 @@ function Invoke-TailscaleReauth {
     # 401 means the daemon runs as a different local user -- retry via SYSTEM scheduled task
     if ($exitCode -ne 0 -and $output -match '401') {
         Write-Log "Invoke-TailscaleReauth: got 401 -- retrying via SYSTEM task..." -Level INFO
-        $tsUpArgs = "up --authkey $AuthKey --accept-routes"
+        $tsUpArgs = "up --auth-key=$AuthKey --accept-routes --reset"
         $sysOk = Invoke-TailscaleViaSystem -TailscaleExe $tailscaleExe `
             -Arguments $tsUpArgs -TimeoutSeconds 25
         if (-not $sysOk) {
